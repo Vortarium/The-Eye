@@ -28,11 +28,13 @@
   #staticOverlay img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; image-rendering:pixelated; }
   #cutsceneText {
     position:absolute; z-index:10; color:#ff0000;
-    font-family:monospace; font-size:1.2rem; letter-spacing:0.15em;
-    text-align:center; padding:1rem; image-rendering:pixelated;
+    font-family:monospace; font-size:0px; letter-spacing:0.15em;
+    text-align:center; padding:1rem;
     text-shadow: 2px 2px #000, -2px -2px #000;
     display:none;
+    image-rendering: pixelated;
   }
+  #cutsceneText canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
   /* Friend jumpscare overlay */
   #friendScare {
     position:fixed; inset:0; display:none; z-index:500; background:#000;
@@ -677,35 +679,88 @@ function startStaticSequence() {
 }
 
 function runCutscene(staticEl, textEl) {
-  // Show first message for 3s
-  textEl.style.display = 'block';
-  textEl.textContent = 'YOU FREED THE WRONG SOUL';
-  setTimeout(() => {
+  function showPixelMsg(msg, cb) {
+    textEl.style.display = 'block';
+    textEl.innerHTML = '';
+    // Draw message onto a small canvas using block pixel font
+    const mc = document.createElement('canvas');
+    mc.width = 320; mc.height = 60;
+    mc.style.imageRendering = 'pixelated';
+    mc.style.width = '640px'; mc.style.height = '120px';
+    const mx = mc.getContext('2d');
+    mx.fillStyle = 'rgba(0,0,0,0.7)';
+    mx.fillRect(0, 0, 320, 60);
+    const font = {
+      'A':[[0,1,0],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],'B':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,1,0]],
+      'C':[[0,1,1],[1,0,0],[1,0,0],[1,0,0],[0,1,1]],'D':[[1,1,0],[1,0,1],[1,0,1],[1,0,1],[1,1,0]],
+      'E':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,1,1]],'F':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,0,0]],
+      'G':[[0,1,1],[1,0,0],[1,0,1],[1,0,1],[0,1,1]],'H':[[1,0,1],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],
+      'I':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[1,1,1]],'J':[[0,0,1],[0,0,1],[0,0,1],[1,0,1],[0,1,0]],
+      'K':[[1,0,1],[1,1,0],[1,0,0],[1,1,0],[1,0,1]],'L':[[1,0,0],[1,0,0],[1,0,0],[1,0,0],[1,1,1]],
+      'M':[[1,0,1],[1,1,1],[1,0,1],[1,0,1],[1,0,1]],'N':[[1,0,1],[1,1,1],[1,1,1],[1,0,1],[1,0,1]],
+      'O':[[0,1,0],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],'P':[[1,1,0],[1,0,1],[1,1,0],[1,0,0],[1,0,0]],
+      'Q':[[0,1,0],[1,0,1],[1,0,1],[1,1,1],[0,1,1]],'R':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,0,1]],
+      'S':[[0,1,1],[1,0,0],[0,1,0],[0,0,1],[1,1,0]],'T':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[0,1,0]],
+      'U':[[1,0,1],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],'V':[[1,0,1],[1,0,1],[1,0,1],[0,1,0],[0,1,0]],
+      'W':[[1,0,1],[1,0,1],[1,0,1],[1,1,1],[1,0,1]],'X':[[1,0,1],[1,0,1],[0,1,0],[1,0,1],[1,0,1]],
+      'Y':[[1,0,1],[1,0,1],[0,1,0],[0,1,0],[0,1,0]],'Z':[[1,1,1],[0,0,1],[0,1,0],[1,0,0],[1,1,1]],
+      ' ':[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]],
+      '!':[[0,1,0],[0,1,0],[0,1,0],[0,0,0],[0,1,0]],
+    };
+    const cw = 2, ch = 2, gap = 1;
+    const totalW = msg.length * (3*cw + gap);
+    let startX = Math.max(2, (320 - totalW) / 2) | 0;
+    // Two lines if too wide
+    const words = msg.split(' ');
+    const lines = [];
+    let cur = '';
+    for (const w of words) {
+      const test = cur ? cur + ' ' + w : w;
+      if (test.length * (3*cw+gap) > 310) { lines.push(cur); cur = w; }
+      else cur = test;
+    }
+    if (cur) lines.push(cur);
+    lines.forEach((line, li) => {
+      const lw = line.length * (3*cw + gap);
+      let lx = Math.max(2, (320 - lw) / 2) | 0;
+      const ly = 8 + li * (5*ch + 4);
+      for (const ch2 of line.toUpperCase()) {
+        const map = font[ch2] || font[' '];
+        for (let row = 0; row < 5; row++) {
+          for (let col = 0; col < 3; col++) {
+            if (map[row][col]) {
+              mx.fillStyle = '#ff2222';
+              mx.fillRect(lx + col*cw, ly + row*ch, cw, ch);
+            }
+          }
+        }
+        lx += 3*cw + gap;
+      }
+    });
+    textEl.appendChild(mc);
+    if (cb) setTimeout(cb, 3000);
+  }
+
+  showPixelMsg('YOU FREED THE WRONG SOUL', () => {
     textEl.style.display = 'none';
-    // 2s gap then second message
     setTimeout(() => {
-      textEl.style.display = 'block';
-      textEl.textContent = 'WE WILL FIND AND TAKE YOU DOWN FOR SINNING';
-      setTimeout(() => {
+      showPixelMsg('WE WILL FIND AND TAKE YOU DOWN FOR SINNING', () => {
         textEl.style.display = 'none';
-        // Flash to black then fade back
         staticEl.style.transition = 'opacity 0.1s';
         staticEl.style.opacity = '0';
         setTimeout(() => {
           staticEl.style.display = 'none';
           staticEl.style.transition = '';
           staticAlpha = 0;
-          // Stop static, restore audio
           if (sounds.static) { sounds.static.pause(); sounds.static.currentTime = 0; sounds.static.volume = 0; }
           if (sounds.ambient)   sounds.ambient.volume   = 0.6;
           if (sounds.heartbeat) sounds.heartbeat.volume = 0.5;
-          // Reset game but keep eyeKilled = true (no more eyes)
           eyeKilled = true;
+          gameStage = 2;
           staticSequenceActive = false;
           playerFrozen = false;
           friendThemeTimer = 0;
           friendThemeStarted = false;
-          // Full reset except eyeKilled flag
           player = { x: 1.5, y: 1.5, angle: 0, hp: 100, maxHp: 100 };
           weaponSlot = null; foodSlot = null; slotsSwapped = false;
           entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
@@ -714,12 +769,12 @@ function runCutscene(staticEl, textEl) {
           chunks.clear(); crates = [];
           wireBoxes = []; wireBoxesDestroyed = 0; puzzleSolved = false;
           damageTimer = 0;
+          gamePlayTime = 0;
           generateChunk(0, 0);
-          // Wire boxes will auto-generate as chunks load (gameStage === 2 check in generateChunk)
         }, 800);
-      }, 3000);
+      });
     }, 2000);
-  }, 3000);
+  });
 }
 
 // ─── Wire Box Spawning ────────────────────────────────────────────────────────
@@ -1163,12 +1218,17 @@ function renderSprites() {
       if (anyVis) drawCrateSprite(bctx, drawX, drawY, spriteW, spriteH, sp.type === 'crateOpen');
       bctx.restore();
     } else if (sp.type === 'wireBox') {
-      const wSpriteH = Math.min(RENDER_H * 2, (RENDER_H / dist * 0.4) | 0); // 4x smaller
+      const wSpriteH = Math.min(RENDER_H, (RENDER_H / dist * 0.4) | 0); // ~40% size of crate
       const wSpriteW = (wSpriteH * 0.8) | 0;
-      const wDrawX = screenX - wSpriteW / 2;
-      const wDrawY = (RENDER_H - wSpriteH) / 2 + wSpriteH * 0.3; // sit lower on wall
-      const startCol = Math.max(0, wDrawX | 0);
-      const endCol   = Math.min(RENDER_W - 1, (wDrawX + wSpriteW) | 0);
+      const wDrawX = screenX - (wSpriteW / 2) | 0;
+      const wDrawY = ((RENDER_H - wSpriteH) / 2) | 0;
+      const startCol = Math.max(0, wDrawX);
+      const endCol   = Math.min(RENDER_W - 1, wDrawX + wSpriteW);
+      let anyVisW = false;
+      for (let c = startCol; c <= endCol; c++) {
+        if (zBuffer[c] > dist) { anyVisW = true; break; }
+      }
+      if (!anyVisW) continue;
       bctx.save();
       bctx.globalAlpha = Math.max(0.05, fog * fog * lightLevel);
       bctx.beginPath();
@@ -1176,11 +1236,14 @@ function renderSprites() {
         if (zBuffer[c] > dist) bctx.rect(c, 0, 1, RENDER_H);
       }
       bctx.clip();
-      let anyVisW = false;
-      for (let c = startCol; c <= endCol; c++) {
-        if (zBuffer[c] > dist) { anyVisW = true; break; }
-      }
-      if (anyVisW) drawWireBoxSprite(bctx, wDrawX, wDrawY, wSpriteW, wSpriteH, sp.data.hp);
+      // Draw as a small crate with a green wire indicator
+      drawCrateSprite(bctx, wDrawX, wDrawY, wSpriteW, wSpriteH, false);
+      // Green wire lines on top
+      const wireColor = sp.data.hp > 2 ? '#0f0' : sp.data.hp > 0 ? '#ff0' : '#f00';
+      bctx.strokeStyle = wireColor;
+      bctx.lineWidth = 1;
+      bctx.beginPath(); bctx.moveTo(wDrawX + wSpriteW*0.2, wDrawY + wSpriteH*0.4); bctx.lineTo(wDrawX + wSpriteW*0.8, wDrawY + wSpriteH*0.4); bctx.stroke();
+      bctx.beginPath(); bctx.moveTo(wDrawX + wSpriteW*0.2, wDrawY + wSpriteH*0.6); bctx.lineTo(wDrawX + wSpriteW*0.8, wDrawY + wSpriteH*0.6); bctx.stroke();
       bctx.restore();
     } else if (sp.type === 'friend' && friendImg && friendImg.complete) {
       bctx.save();
