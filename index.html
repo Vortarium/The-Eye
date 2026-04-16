@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>THE EYE</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; overflow:hidden; width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; font-family:'Share Tech Mono', monospace; }
+  #gameCanvas { image-rendering: pixelated; image-rendering: crisp-edges; display:block; }
+  #overlay {
+    position:fixed; inset:0; background:#000; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; z-index:100; cursor:pointer;
+  }
+  #overlay h1 { color:#8b0000; font-size:4rem; letter-spacing:0.3em; text-shadow:0 0 30px #ff0000; margin-bottom:1rem; }
+  #overlay p { color:#555; font-size:1rem; letter-spacing:0.2em; animation: blink 1.5s infinite; }
+  #overlay .sub { color:#333; font-size:0.7rem; margin-top:2rem; letter-spacing:0.1em; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+  #died {
+    position:fixed; inset:0; background:#000; display:none; flex-direction:column;
+    align-items:center; justify-content:center; z-index:200;
+  }
+  #died h1 { color:#8b0000; font-size:5rem; letter-spacing:0.4em; text-shadow:0 0 40px #ff0000; }
+  #jumpscare {
+    position:fixed; inset:0; display:none; z-index:300; background:#000;
+    align-items:center; justify-content:center;
+  }
+  #jumpscare img { width:100%; height:100%; object-fit:cover; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="overlay">
+  <h1>THE EYE</h1>
+  <p>CLICK TO ENTER</p>
+  <div class="sub">arrows: move/turn &nbsp;|&nbsp; space/click: attack &nbsp;|&nbsp; down: swap items</div>
+</div>
+<div id="died"><h1>YOU DIED</h1></div>
+<div id="jumpscare"><img src="eye.png" alt=""></div>
+
+<script>
+// ─── Constants ───────────────────────────────────────────────────────────────
+const RENDER_W = 320, RENDER_H = 200;
+const FOV = Math.PI / 2.5;
+const HALF_FOV = FOV / 2;
+const NUM_RAYS = RENDER_W;
+const MAX_DEPTH = 20;
+const CELL = 2;
+const CHUNK_SIZE = 8; // cells per chunk side
+const PLAYER_SPEED = 0.05;
+const TURN_STEP = Math.PI / 4; // 45 degrees
+const ENTITY_SPEED = 0.018;
+const ENTITY_START_DELAY = 30000;
+
+// ─── Canvas setup ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const scale = Math.min(window.innerWidth / RENDER_W, window.innerHeight / RENDER_H);
+  canvas.width = RENDER_W;
+  canvas.height = RENDER_H;
+  canvas.style.width = (RENDER_W * scale) + 'px';
+  canvas.style.height = (RENDER_H * scale) + 'px';
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// ─── Offscreen buffer ────────────────────────────────────────────────────────
+const buf = document.createElement('canvas');
+buf.width = RENDER_W; buf.height = RENDER_H;
+const bctx = buf.getContext('2d');
+
+// ─── Audio ───────────────────────────────────────────────────────────────────
+let audioCtx = null;
+const sounds = {};
+
+function loadAudio(name, src) {
+  const audio = new Audio(src);
+  audio.preload = 'auto';
+  sounds[name] = audio;
+  return audio;
+}
+
+function initAudio() {
+  loadAudio('ambient', 'ambient.mp3');
+  loadAudio('heartbeat', 'heartbeat.mp3');
+  loadAudio('walk', 'walk.mp3');
+  loadAudio('punch', 'punch.mp3');
+  loadAudio('jumpscare', 'jumpscare.mp3');
+  loadAudio('music', 'music.mp3');
+
+  sounds.ambient.loop = true;
+  sounds.ambient.volume = 0;
+  sounds.heartbeat.loop = true;
+  sounds.heartbeat.volume = 0;
+
+  sounds.ambient.play().catch(()=>{});
+  sounds.heartbeat.play().catch(()=>{});
+
+  // Fade in over 5 seconds
+  let t = 0;
+  const fadeIn = setInterval(() => {
+    t += 0.05;
+    sounds.ambient.volume = Math.min(0.6, t * 0.6 / 5);
+    sounds.heartbeat.volume = Math.min(0.5, t * 0.5 / 5);
+    if (t >= 5) clearInterval(fadeIn);
+  }, 50);
+
+  // Music: 1% chance every second
+  setInterval(() => {
+    if (!musicPlaying && Math.random() < 0.01) {
+      musicPlaying = true;
+      sounds.music.currentTime = 0;
+      sounds.music.play().catch(()=>{});
+      sounds.music.onended = () => { musicPlaying = false; };
+    }
+  }, 1000);
+}
+
+let musicPlaying = false;
+let walkTimer = 0;
+let heartbeatRecovery = null;
+
+function playWalk() {
+  const now = performance.now();
+  if (now - walkTimer > 900) {
+    walkTimer = now;
+    sounds.walk.currentTime = 0;
+    sounds.walk.play().catch(()=>{});
+  }
+}
+
+function playPunch() {
+  sounds.punch.currentTime = 0;
+  sounds.punch.play().catch(()=>{});
+}
+
+function triggerHeartbeatFear() {
+  sounds.heartbeat.volume = 1.0;
+  sounds.heartbeat.playbackRate = 1.5;
+  if (heartbeatRecovery) clearTimeout(heartbeatRecovery);
+}
+
+function startHeartbeatRecovery() {
+  if (heartbeatRecovery) clearTimeout(heartbeatRecovery);
+  heartbeatRecovery = setTimeout(() => {
+    let t = 0;
+    const interval = setInterval(() => {
+      t += 0.1;
+      sounds.heartbeat.volume = Math.max(0.5, 1.0 - t * 0.05);
+      sounds.heartbeat.playbackRate = Math.max(1.0, 1.5 - t * 0.05);
+      if (t >= 10) { clearInterval(interval); sounds.heartbeat.volume = 0.5; sounds.heartbeat.playbackRate = 1.0; }
+    }, 100);
+  }, 10000);
+}
+
+// ─── Procedural Textures ─────────────────────────────────────────────────────
+const TEX_SIZE = 64;
+
+function makeWallTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = TEX_SIZE;
+  const x = c.getContext('2d');
+  // Base rust/metal
+  for (let py = 0; py < TEX_SIZE; py++) {
+    for (let px = 0; px < TEX_SIZE; px++) {
+      const n = noise2(px * 0.3, py * 0.3);
+      const r = 80 + n * 40 | 0;
+      const g = 40 + n * 20 | 0;
+      const b = 20 + n * 10 | 0;
+      x.fillStyle = `rgb(${r},${g},${b})`;
+      x.fillRect(px, py, 1, 1);
+    }
+  }
+  // Dark streaks
+  for (let i = 0; i < 6; i++) {
+    const sx = Math.random() * TEX_SIZE;
+    x.strokeStyle = `rgba(20,10,5,${0.3 + Math.random() * 0.4})`;
+    x.lineWidth = 1 + Math.random() * 2;
+    x.beginPath(); x.moveTo(sx, 0); x.lineTo(sx + (Math.random()-0.5)*10, TEX_SIZE); x.stroke();
+  }
+  // Blood splatters
+  for (let i = 0; i < 4; i++) {
+    const bx = Math.random() * TEX_SIZE, by = Math.random() * TEX_SIZE;
+    const br = 3 + Math.random() * 8;
+    x.fillStyle = `rgba(120,0,0,${0.5 + Math.random() * 0.5})`;
+    x.beginPath(); x.ellipse(bx, by, br, br * 0.6, Math.random() * Math.PI, 0, Math.PI * 2); x.fill();
+    // drips
+    x.fillRect(bx - 1, by, 2, br * 2);
+  }
+  return c;
+}
+
+function makeFloorTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = TEX_SIZE;
+  const x = c.getContext('2d');
+  for (let py = 0; py < TEX_SIZE; py++) {
+    for (let px = 0; px < TEX_SIZE; px++) {
+      const n = noise2(px * 0.5, py * 0.5);
+      const v = 55 + n * 25 | 0;
+      x.fillStyle = `rgb(${v},${v},${v})`;
+      x.fillRect(px, py, 1, 1);
+    }
+  }
+  // Cracks
+  for (let i = 0; i < 4; i++) {
+    x.strokeStyle = `rgba(30,30,30,0.6)`;
+    x.lineWidth = 1;
+    x.beginPath();
+    let cx2 = Math.random() * TEX_SIZE, cy2 = Math.random() * TEX_SIZE;
+    x.moveTo(cx2, cy2);
+    for (let j = 0; j < 5; j++) { cx2 += (Math.random()-0.5)*12; cy2 += (Math.random()-0.5)*12; x.lineTo(cx2, cy2); }
+    x.stroke();
+  }
+  // Blood
+  for (let i = 0; i < 2; i++) {
+    const bx = Math.random() * TEX_SIZE, by = Math.random() * TEX_SIZE;
+    x.fillStyle = `rgba(100,0,0,0.4)`;
+    x.beginPath(); x.ellipse(bx, by, 6, 4, Math.random() * Math.PI, 0, Math.PI * 2); x.fill();
+  }
+  return c;
+}
+
+// Simple value noise
+function noise2(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const a = hash(ix, iy), b = hash(ix+1, iy), c2 = hash(ix, iy+1), d = hash(ix+1, iy+1);
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  return a + (b-a)*ux + (c2-a)*uy + (a-b-c2+d)*ux*uy;
+}
+function hash(x, y) {
+  let h = (x * 374761393 + y * 668265263) | 0;
+  h = (h ^ (h >> 13)) * 1274126177;
+  return ((h ^ (h >> 16)) & 0xffff) / 0xffff;
+}
+
+const wallTex = makeWallTexture();
+const floorTex = makeFloorTexture();
+const wallTexData = wallTex.getContext('2d').getImageData(0, 0, TEX_SIZE, TEX_SIZE).data;
+const floorTexData = floorTex.getContext('2d').getImageData(0, 0, TEX_SIZE, TEX_SIZE).data;
+
+// ─── Maze / World ─────────────────────────────────────────────────────────────
+// World is a map of "chunkKey" -> 2D boolean array (true = wall)
+const chunks = new Map();
+
+function chunkKey(cx, cy) { return `${cx},${cy}`; }
+
+function generateChunk(cx, cy) {
+  const key = chunkKey(cx, cy);
+  if (chunks.has(key)) return;
+  const W = CHUNK_SIZE, H = CHUNK_SIZE;
+  // Grid: each cell is 2x2 world units. We store walls as a (2W+1) x (2H+1) grid
+  const grid = [];
+  for (let y = 0; y < 2*H+1; y++) { grid[y] = []; for (let x = 0; x < 2*W+1; x++) grid[y][x] = 1; }
+
+  // Recursive backtracker
+  const visited = [];
+  for (let y = 0; y < H; y++) { visited[y] = []; for (let x = 0; x < W; x++) visited[y][x] = false; }
+
+  function carve(x, y) {
+    visited[y][x] = true;
+    grid[y*2+1][x*2+1] = 0;
+    const dirs = [[0,-1],[1,0],[0,1],[-1,0]].sort(() => Math.random()-0.5);
+    for (const [dx, dy] of dirs) {
+      const nx = x+dx, ny = y+dy;
+      if (nx>=0 && nx<W && ny>=0 && ny<H && !visited[ny][nx]) {
+        grid[y*2+1+dy][x*2+1+dx] = 0;
+        carve(nx, ny);
+      }
+    }
+  }
+  carve(0, 0);
+
+  // Open edges to connect to neighbors (always open border cells at midpoints)
+  // Top edge
+  for (let x = 0; x < W; x++) grid[0][x*2+1] = 0;
+  // Bottom edge
+  for (let x = 0; x < W; x++) grid[2*H][x*2+1] = 0;
+  // Left edge
+  for (let y = 0; y < H; y++) grid[y*2+1][0] = 0;
+  // Right edge
+  for (let y = 0; y < H; y++) grid[y*2+1][2*W] = 0;
+
+  chunks.set(key, grid);
+}
+
+function getChunkCoords(wx, wy) {
+  const chunkW = CHUNK_SIZE * CELL;
+  const cx = Math.floor(wx / chunkW);
+  const cy = Math.floor(wy / chunkW);
+  return [cx, cy];
+}
+
+function isWall(wx, wy) {
+  const chunkW = CHUNK_SIZE * CELL;
+  const cx = Math.floor(wx / chunkW);
+  const cy = Math.floor(wy / chunkW);
+  generateChunk(cx, cy);
+  const grid = chunks.get(chunkKey(cx, cy));
+  const lx = wx - cx * chunkW;
+  const ly = wy - cy * chunkW;
+  const gx = Math.floor(lx);
+  const gy = Math.floor(ly);
+  const gridW = CHUNK_SIZE * 2 + 1;
+  if (gx < 0 || gy < 0 || gx >= gridW || gy >= gridW) return true;
+  return grid[gy][gx] === 1;
+}
+
+// ─── Player ───────────────────────────────────────────────────────────────────
+let player = { x: 1.5, y: 1.5, angle: 0, hp: 100, maxHp: 100 };
+let mainHand = null; // { type:'knife', durability:5 } or { type:'food' }
+let offHand = null;
+
+// ─── Entity ───────────────────────────────────────────────────────────────────
+let entity = { x: 5.5, y: 5.5, active: false, dist: 999 };
+let entityStartTimer = null;
+let jumpscareActive = false;
+let jumpscareTimer = null;
+let entityNearTimer = null;
+
+// ─── Crates ───────────────────────────────────────────────────────────────────
+let crates = [];
+function spawnCrates() {
+  crates = [];
+  for (let i = 0; i < 12; i++) {
+    let cx, cy;
+    do {
+      cx = 1.5 + Math.floor(Math.random() * 20) * 2;
+      cy = 1.5 + Math.floor(Math.random() * 20) * 2;
+    } while (isWall(cx, cy) || (Math.abs(cx - player.x) < 3 && Math.abs(cy - player.y) < 3));
+    crates.push({ x: cx, y: cy, open: false });
+  }
+}
+
+// ─── Input ────────────────────────────────────────────────────────────────────
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') handleAttack();
+  if (e.code === 'ArrowDown' && !keys['_downHandled']) {
+    // swap handled in game loop
+  }
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+canvas.addEventListener('click', handleAttack);
+
+let lastSwap = 0;
+function handleSwap() {
+  const now = performance.now();
+  if (now - lastSwap < 300) return;
+  lastSwap = now;
+  const tmp = mainHand; mainHand = offHand; offHand = tmp;
+}
+
+// ─── Hand Animation ───────────────────────────────────────────────────────────
+let handSway = 0;
+let handSwayDir = 1;
+let punchAnim = 0; // 0=idle, >0=punching
+let punchDir = 1;
+
+function handleAttack() {
+  if (jumpscareActive) return;
+  if (punchAnim > 0) return;
+  punchAnim = 1.0;
+  playPunch();
+
+  // Check crate interaction
+  for (let i = 0; i < crates.length; i++) {
+    const cr = crates[i];
+    if (cr.open) continue;
+    const dx = cr.x - player.x, dy = cr.y - player.y;
+    if (Math.sqrt(dx*dx+dy*dy) < 1.5) {
+      cr.open = true;
+      const roll = Math.random();
+      if (roll < 0.5) {
+        const item = { type: 'knife', durability: 5 };
+        if (!mainHand) mainHand = item; else if (!offHand) offHand = item;
+      } else {
+        const item = { type: 'food' };
+        if (!offHand) offHand = item; else if (!mainHand) mainHand = item;
+      }
+      return;
+    }
+  }
+
+  // Knife durability
+  if (mainHand && mainHand.type === 'knife') {
+    mainHand.durability--;
+    if (mainHand.durability <= 0) mainHand = null;
+  }
+}
+
+// ─── Raycasting ───────────────────────────────────────────────────────────────
+const zBuffer = new Float32Array(NUM_RAYS);
+
+function castRay(angle) {
+  const sinA = Math.sin(angle), cosA = Math.cos(angle);
+  let dist = 0;
+  const step = 0.02;
+  let wx = player.x, wy = player.y;
+  let hit = false;
+  let wallX = 0;
+
+  for (let i = 0; i < MAX_DEPTH / step; i++) {
+    wx += cosA * step;
+    wy += sinA * step;
+    dist += step;
+    if (isWall(wx, wy)) {
+      hit = true;
+      // Determine texture X
+      const fx = wx - Math.floor(wx);
+      const fy = wy - Math.floor(wy);
+      wallX = (Math.abs(cosA) > Math.abs(sinA)) ? fy : fx;
+      break;
+    }
+    if (dist >= MAX_DEPTH) break;
+  }
+  return { dist, hit, wallX };
+}
+
+function renderScene() {
+  // Ceiling
+  const ceilGrad = bctx.createLinearGradient(0, 0, 0, RENDER_H/2);
+  ceilGrad.addColorStop(0, '#050505');
+  ceilGrad.addColorStop(1, '#111');
+  bctx.fillStyle = ceilGrad;
+  bctx.fillRect(0, 0, RENDER_W, RENDER_H/2);
+
+  // Floor
+  bctx.fillStyle = '#1a1a1a';
+  bctx.fillRect(0, RENDER_H/2, RENDER_W, RENDER_H/2);
+
+  const imgData = bctx.getImageData(0, 0, RENDER_W, RENDER_H);
+  const data = imgData.data;
+
+  for (let col = 0; col < NUM_RAYS; col++) {
+    const rayAngle = player.angle - HALF_FOV + (col / NUM_RAYS) * FOV;
+    const { dist, hit, wallX } = castRay(rayAngle);
+    const corrDist = dist * Math.cos(rayAngle - player.angle);
+    zBuffer[col] = corrDist;
+
+    if (hit) {
+      const wallH = Math.min(RENDER_H, (RENDER_H / corrDist) | 0);
+      const wallTop = ((RENDER_H - wallH) / 2) | 0;
+      const fog = Math.max(0, 1 - corrDist / MAX_DEPTH);
+      const fogSq = fog * fog;
+
+      const texX = (wallX * TEX_SIZE) & (TEX_SIZE - 1);
+
+      for (let row = wallTop; row < wallTop + wallH; row++) {
+        const texY = (((row - wallTop) / wallH) * TEX_SIZE) & (TEX_SIZE - 1);
+        const ti = (texY * TEX_SIZE + texX) * 4;
+        const idx = (row * RENDER_W + col) * 4;
+        data[idx]   = (wallTexData[ti]   * fogSq) | 0;
+        data[idx+1] = (wallTexData[ti+1] * fogSq) | 0;
+        data[idx+2] = (wallTexData[ti+2] * fogSq) | 0;
+        data[idx+3] = 255;
+      }
+
+    }
+  }
+
+  // Floor/ceiling casting (done per-row, per-column after walls)
+  for (let row = 0; row < RENDER_H; row++) {
+    const isCeil = row < RENDER_H / 2;
+    const rowDist = (RENDER_H / 2) / Math.abs(row - RENDER_H / 2 + 0.001);
+    const floorFog = Math.max(0, 1 - rowDist / MAX_DEPTH);
+    const floorFogSq = floorFog * floorFog * 0.6;
+
+    const rowStep_x = Math.cos(player.angle - HALF_FOV) * rowDist;
+    const rowStep_y = Math.sin(player.angle - HALF_FOV) * rowDist;
+    const rowEnd_x = Math.cos(player.angle + HALF_FOV) * rowDist;
+    const rowEnd_y = Math.sin(player.angle + HALF_FOV) * rowDist;
+
+    for (let col = 0; col < NUM_RAYS; col++) {
+      const idx2 = (row * RENDER_W + col) * 4;
+      // Skip if wall already drawn here
+      if (data[idx2+3] === 255 && (data[idx2] !== 0 || data[idx2+1] !== 0 || data[idx2+2] !== 0)) continue;
+
+      const t = col / NUM_RAYS;
+      const fx = player.x + rowStep_x + (rowEnd_x - rowStep_x) * t;
+      const fy = player.y + rowStep_y + (rowEnd_y - rowStep_y) * t;
+      const ftx = ((Math.abs(Math.floor(fx * TEX_SIZE)) % TEX_SIZE) + TEX_SIZE) % TEX_SIZE;
+      const fty = ((Math.abs(Math.floor(fy * TEX_SIZE)) % TEX_SIZE) + TEX_SIZE) % TEX_SIZE;
+      const fi = (fty * TEX_SIZE + ftx) * 4;
+
+      if (isCeil) {
+        data[idx2] = data[idx2+1] = data[idx2+2] = (5 * floorFogSq) | 0;
+        data[idx2+3] = 255;
+      } else {
+        data[idx2]   = (floorTexData[fi]   * floorFogSq) | 0;
+        data[idx2+1] = (floorTexData[fi+1] * floorFogSq) | 0;
+        data[idx2+2] = (floorTexData[fi+2] * floorFogSq) | 0;
+        data[idx2+3] = 255;
+      }
+    }
+  }
+
+  bctx.putImageData(imgData, 0, 0);
+}
+
+// ─── Sprite Rendering ─────────────────────────────────────────────────────────
+let eyeImg = null;
+function loadEyeImg() {
+  eyeImg = new Image();
+  eyeImg.src = 'eye.png';
+}
+
+function renderSprites() {
+  // Collect sprites: entity + crates
+  const sprites = [];
+
+  if (entity.active || !jumpscareActive) {
+    const dx = entity.x - player.x, dy = entity.y - player.y;
+    const dist = Math.sqrt(dx*dx+dy*dy);
+    sprites.push({ x: entity.x, y: entity.y, dist, type: 'entity' });
+  }
+
+  for (const cr of crates) {
+    const dx = cr.x - player.x, dy = cr.y - player.y;
+    const dist = Math.sqrt(dx*dx+dy*dy);
+    sprites.push({ x: cr.x, y: cr.y, dist, type: cr.open ? 'crateOpen' : 'crate' });
+  }
+
+  sprites.sort((a, b) => b.dist - a.dist);
+
+  for (const sp of sprites) {
+    const dx = sp.x - player.x, dy = sp.y - player.y;
+    const dist = sp.dist;
+    if (dist < 0.1) continue;
+
+    const spriteAngle = Math.atan2(dy, dx) - player.angle;
+    let sa = spriteAngle;
+    while (sa > Math.PI) sa -= Math.PI * 2;
+    while (sa < -Math.PI) sa += Math.PI * 2;
+
+    if (Math.abs(sa) > HALF_FOV + 0.2) continue;
+
+    const fog = Math.max(0, 1 - dist / MAX_DEPTH);
+    const screenX = ((0.5 + sa / FOV) * RENDER_W) | 0;
+    const spriteH = Math.min(RENDER_H * 2, (RENDER_H / dist) | 0);
+    const spriteW = spriteH;
+    const drawX = screenX - spriteW / 2;
+    const drawY = (RENDER_H - spriteH) / 2;
+
+    if (sp.type === 'entity' && eyeImg && eyeImg.complete) {
+      bctx.save();
+      bctx.globalAlpha = fog * fog;
+      // Occlusion check via zBuffer
+      const startCol = Math.max(0, drawX | 0);
+      const endCol = Math.min(RENDER_W - 1, (drawX + spriteW) | 0);
+      let visible = false;
+      for (let c = startCol; c <= endCol; c += 2) {
+        if (zBuffer[c] > dist) { visible = true; break; }
+      }
+      if (visible) {
+        bctx.drawImage(eyeImg, drawX, drawY, spriteW, spriteH);
+      }
+      bctx.restore();
+    } else if (sp.type === 'crate' || sp.type === 'crateOpen') {
+      bctx.save();
+      bctx.globalAlpha = fog * fog;
+      // Check occlusion
+      const startCol = Math.max(0, drawX | 0);
+      const endCol = Math.min(RENDER_W - 1, (drawX + spriteW) | 0);
+      let visible = false;
+      for (let c = startCol; c <= endCol; c += 2) {
+        if (zBuffer[c] > dist) { visible = true; break; }
+      }
+      if (visible) drawCrateSprite(bctx, drawX, drawY, spriteW, spriteH, sp.type === 'crateOpen');
+      bctx.restore();
+    }
+  }
+}
+
+function drawCrateSprite(ctx2, x, y, w, h, open) {
+  ctx2.fillStyle = open ? '#3a2a10' : '#6b4c1e';
+  ctx2.fillRect(x, y + h*0.2, w, h*0.8);
+  ctx2.fillStyle = '#4a3010';
+  ctx2.fillRect(x, y + h*0.2, w, h*0.1);
+  ctx2.fillRect(x, y + h*0.6, w, h*0.05);
+  ctx2.fillStyle = '#2a1a05';
+  ctx2.fillRect(x + w*0.45, y + h*0.2, w*0.1, h*0.8);
+  if (open) {
+    ctx2.fillStyle = '#1a0a00';
+    ctx2.fillRect(x + w*0.1, y + h*0.25, w*0.8, h*0.3);
+  }
+}
+
+// ─── HUD ──────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  const hudH = 28, hudW = RENDER_W;
+  const hudY = RENDER_H - hudH;
+
+  // Background
+  bctx.fillStyle = 'rgba(0,0,0,0.75)';
+  bctx.fillRect(0, hudY, hudW, hudH);
+  bctx.strokeStyle = '#333';
+  bctx.lineWidth = 1;
+  bctx.strokeRect(0, hudY, hudW, hudH);
+
+  // HP
+  bctx.fillStyle = '#8b0000';
+  bctx.font = '8px monospace';
+  bctx.fillText(`HP: ${Math.ceil(player.hp)}/${player.maxHp}`, 4, hudY + 10);
+
+  // HP bar
+  const barW = 60, barH = 5;
+  bctx.fillStyle = '#300';
+  bctx.fillRect(4, hudY + 13, barW, barH);
+  bctx.fillStyle = '#c00';
+  bctx.fillRect(4, hudY + 13, (barW * player.hp / player.maxHp) | 0, barH);
+
+  // Item slots
+  const slotSize = 22;
+  const slotX1 = RENDER_W/2 - slotSize - 4;
+  const slotX2 = RENDER_W/2 + 4;
+  const slotY = hudY + 3;
+
+  // Main hand
+  bctx.strokeStyle = '#555';
+  bctx.lineWidth = 1;
+  bctx.strokeRect(slotX1, slotY, slotSize, slotSize);
+  bctx.fillStyle = 'rgba(20,20,20,0.8)';
+  bctx.fillRect(slotX1+1, slotY+1, slotSize-2, slotSize-2);
+  if (mainHand) drawItemIcon(bctx, mainHand, slotX1+2, slotY+2, slotSize-4);
+
+  // Off hand
+  bctx.strokeStyle = '#444';
+  bctx.strokeRect(slotX2, slotY, slotSize, slotSize);
+  bctx.fillStyle = 'rgba(20,20,20,0.8)';
+  bctx.fillRect(slotX2+1, slotY+1, slotSize-2, slotSize-2);
+  if (offHand) drawItemIcon(bctx, offHand, slotX2+2, slotY+2, slotSize-4);
+
+  // Labels
+  bctx.fillStyle = '#555';
+  bctx.font = '5px monospace';
+  bctx.fillText('MAIN', slotX1+2, slotY + slotSize + 6);
+  bctx.fillText('OFF', slotX2+3, slotY + slotSize + 6);
+}
+
+function drawItemIcon(ctx2, item, x, y, size) {
+  if (item.type === 'knife') {
+    // Pixelated knife
+    ctx2.fillStyle = '#aaa';
+    ctx2.fillRect(x + size*0.4, y, size*0.2, size*0.6);
+    ctx2.fillStyle = '#888';
+    ctx2.fillRect(x + size*0.35, y + size*0.55, size*0.3, size*0.1);
+    ctx2.fillStyle = '#6b4c1e';
+    ctx2.fillRect(x + size*0.35, y + size*0.65, size*0.3, size*0.35);
+    // Durability
+    ctx2.fillStyle = '#c00';
+    ctx2.font = '5px monospace';
+    ctx2.fillText(item.durability, x, y + size);
+  } else if (item.type === 'food') {
+    // Pixelated food (bread/meat)
+    ctx2.fillStyle = '#8b6914';
+    ctx2.fillRect(x + size*0.1, y + size*0.3, size*0.8, size*0.5);
+    ctx2.fillStyle = '#c8922a';
+    ctx2.fillRect(x + size*0.2, y + size*0.2, size*0.6, size*0.2);
+    ctx2.fillStyle = '#a07020';
+    ctx2.fillRect(x + size*0.15, y + size*0.35, size*0.7, size*0.1);
+  }
+}
+
+// ─── Hand Drawing ─────────────────────────────────────────────────────────────
+function drawHand() {
+  const hw = 50, hh = 40;
+  const hx = RENDER_W - hw - 4;
+  let hy = RENDER_H - hh - 30;
+
+  // Sway
+  hy += Math.sin(handSway) * 2;
+
+  // Punch offset
+  const punchOffset = punchAnim > 0.5 ? (1 - punchAnim) * 20 : punchAnim * 20;
+  const hxP = hx - punchOffset;
+
+  // Arm/wrist
+  bctx.fillStyle = '#c68642';
+  bctx.fillRect(hxP + 15, hy + 20, 20, 20);
+
+  // Knuckles
+  bctx.fillStyle = '#b5763a';
+  bctx.fillRect(hxP + 12, hy + 10, 26, 14);
+
+  // Fingers (4 blocks)
+  for (let i = 0; i < 4; i++) {
+    bctx.fillStyle = '#c68642';
+    bctx.fillRect(hxP + 12 + i*7, hy, 6, 12);
+    bctx.fillStyle = '#a0622e';
+    bctx.fillRect(hxP + 12 + i*7, hy + 8, 6, 4);
+  }
+
+  // Thumb
+  bctx.fillStyle = '#c68642';
+  bctx.fillRect(hxP + 8, hy + 14, 6, 10);
+
+  // If knife equipped, draw it
+  if (mainHand && mainHand.type === 'knife') {
+    bctx.fillStyle = '#ccc';
+    bctx.fillRect(hxP - 8, hy + 5, 6, 20);
+    bctx.fillStyle = '#888';
+    bctx.fillRect(hxP - 6, hy + 22, 10, 3);
+    bctx.fillStyle = '#6b4c1e';
+    bctx.fillRect(hxP - 5, hy + 25, 8, 8);
+  }
+}
+
+// ─── Vignette & Noise ─────────────────────────────────────────────────────────
+function drawVignette() {
+  const grad = bctx.createRadialGradient(RENDER_W/2, RENDER_H/2, RENDER_H*0.2, RENDER_W/2, RENDER_H/2, RENDER_H*0.9);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.85)');
+  bctx.fillStyle = grad;
+  bctx.fillRect(0, 0, RENDER_W, RENDER_H);
+}
+
+function drawNoise() {
+  const imgData = bctx.getImageData(0, 0, RENDER_W, RENDER_H);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() * 20 - 10) | 0;
+    d[i] = Math.max(0, Math.min(255, d[i] + n));
+    d[i+1] = Math.max(0, Math.min(255, d[i+1] + n));
+    d[i+2] = Math.max(0, Math.min(255, d[i+2] + n));
+  }
+  bctx.putImageData(imgData, 0, 0);
+}
+
+function drawScanlines() {
+  for (let y = 0; y < RENDER_H; y += 2) {
+    bctx.fillStyle = 'rgba(0,0,0,0.15)';
+    bctx.fillRect(0, y, RENDER_W, 1);
+  }
+}
+
+// ─── Entity AI (BFS pathfinding) ──────────────────────────────────────────────
+let entityPath = [];
+let entityPathTimer = 0;
+
+function worldToCell(wx, wy) {
+  return [Math.floor(wx), Math.floor(wy)];
+}
+
+function bfsPath(sx, sy, ex, ey) {
+  const maxSteps = 200;
+  const queue = [[sx, sy, []]];
+  const visited = new Set();
+  visited.add(`${sx},${sy}`);
+
+  while (queue.length > 0) {
+    const [cx, cy, path] = queue.shift();
+    if (cx === ex && cy === ey) return path;
+    if (path.length > maxSteps) continue;
+
+    for (const [dx, dy] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+      const nx = cx+dx, ny = cy+dy;
+      const k = `${nx},${ny}`;
+      if (!visited.has(k) && !isWall(nx+0.5, ny+0.5)) {
+        visited.add(k);
+        queue.push([nx, ny, [...path, [nx+0.5, ny+0.5]]]);
+      }
+    }
+  }
+  return [];
+}
+
+function updateEntity(dt) {
+  if (!entity.active) return;
+
+  const dx = player.x - entity.x, dy = player.y - entity.y;
+  entity.dist = Math.sqrt(dx*dx+dy*dy);
+
+  // Jumpscare
+  if (entity.dist < 0.5 && !jumpscareActive) {
+    triggerJumpscare();
+    return;
+  }
+
+  // Damage
+  if (entity.dist < 3) {
+    const dmg = entity.dist < 1 ? 5 : 1 + (3 - entity.dist) * (4/2);
+    player.hp = Math.max(0, player.hp - dmg * dt);
+    triggerHeartbeatFear();
+    if (heartbeatRecovery) { clearTimeout(heartbeatRecovery); heartbeatRecovery = null; }
+  } else {
+    if (!heartbeatRecovery) startHeartbeatRecovery();
+  }
+
+  // Pathfind
+  entityPathTimer -= dt;
+  if (entityPathTimer <= 0 || entityPath.length === 0) {
+    entityPathTimer = 1.0;
+    const [ex, ey] = worldToCell(entity.x, entity.y);
+    const [px, py] = worldToCell(player.x, player.y);
+    entityPath = bfsPath(ex, ey, px, py);
+  }
+
+  // Move along path
+  if (entityPath.length > 0) {
+    const target = entityPath[0];
+    const tdx = target[0] - entity.x, tdy = target[1] - entity.y;
+    const tdist = Math.sqrt(tdx*tdx+tdy*tdy);
+    if (tdist < 0.1) {
+      entityPath.shift();
+    } else {
+      const speed = ENTITY_SPEED * dt * 60;
+      entity.x += (tdx/tdist) * speed;
+      entity.y += (tdy/tdist) * speed;
+    }
+  }
+}
+
+// ─── Jumpscare ────────────────────────────────────────────────────────────────
+const jumpscareEl = document.getElementById('jumpscare');
+
+function triggerJumpscare() {
+  if (jumpscareActive) return;
+  jumpscareActive = true;
+  jumpscareEl.style.display = 'flex';
+  sounds.jumpscare.currentTime = 0;
+  sounds.jumpscare.play().catch(()=>{});
+  triggerHeartbeatFear();
+
+  setTimeout(() => {
+    jumpscareEl.style.display = 'none';
+    jumpscareActive = false;
+    // Push entity away
+    entity.x = player.x + 8;
+    entity.y = player.y + 8;
+    entityPath = [];
+    startHeartbeatRecovery();
+  }, 2000);
+}
+
+// ─── Death ────────────────────────────────────────────────────────────────────
+const diedEl = document.getElementById('died');
+let dead = false;
+
+function triggerDeath() {
+  if (dead) return;
+  dead = true;
+  diedEl.style.display = 'flex';
+  setTimeout(() => {
+    resetGame();
+  }, 3000);
+}
+
+function resetGame() {
+  player = { x: 1.5, y: 1.5, angle: 0, hp: 100, maxHp: 100 };
+  mainHand = null; offHand = null;
+  entity = { x: 5.5, y: 5.5, active: false, dist: 999 };
+  entityPath = [];
+  dead = false;
+  jumpscareActive = false;
+  diedEl.style.display = 'none';
+  jumpscareEl.style.display = 'none';
+  chunks.clear();
+  spawnCrates();
+  generateChunk(0, 0);
+
+  if (entityStartTimer) clearTimeout(entityStartTimer);
+  entityStartTimer = setTimeout(() => { entity.active = true; }, ENTITY_START_DELAY);
+}
+
+// ─── Game Loop ────────────────────────────────────────────────────────────────
+let lastTime = 0;
+let gameStarted = false;
+
+function gameLoop(ts) {
+  requestAnimationFrame(gameLoop);
+  if (!gameStarted) return;
+
+  const dt = Math.min((ts - lastTime) / 1000, 0.1);
+  lastTime = ts;
+
+  if (dead || jumpscareActive) return;
+
+  // ── Input ──
+  let moved = false;
+
+  if (keys['ArrowLeft']) {
+    player.angle -= TURN_STEP * dt * 3;
+  }
+  if (keys['ArrowRight']) {
+    player.angle += TURN_STEP * dt * 3;
+  }
+
+  if (keys['ArrowUp']) {
+    const nx = player.x + Math.cos(player.angle) * PLAYER_SPEED * dt * 60;
+    const ny = player.y + Math.sin(player.angle) * PLAYER_SPEED * dt * 60;
+    if (!isWall(nx + Math.cos(player.angle)*0.2, player.y)) player.x = nx;
+    if (!isWall(player.x, ny + Math.sin(player.angle)*0.2)) player.y = ny;
+    moved = true;
+    playWalk();
+  }
+  if (keys['ArrowDown']) {
+    // Check if it's a swap (handled separately) or backward movement
+    // Backward movement
+    const nx = player.x - Math.cos(player.angle) * PLAYER_SPEED * dt * 60;
+    const ny = player.y - Math.sin(player.angle) * PLAYER_SPEED * dt * 60;
+    if (!isWall(nx - Math.cos(player.angle)*0.2, player.y)) player.x = nx;
+    if (!isWall(player.x, ny - Math.sin(player.angle)*0.2)) player.y = ny;
+  }
+
+  // Swap on S key (separate from down arrow movement — use 'KeyS')
+  if (keys['KeyS'] && !keys['_sHandled']) {
+    keys['_sHandled'] = true;
+    handleSwap();
+  }
+  if (!keys['KeyS']) keys['_sHandled'] = false;
+
+  // ── Hand animation ──
+  if (moved) {
+    handSway += 0.15;
+  }
+  if (punchAnim > 0) {
+    punchAnim -= dt * 4;
+    if (punchAnim < 0) punchAnim = 0;
+  }
+
+  // ── Entity ──
+  updateEntity(dt);
+
+  // ── Death check ──
+  if (player.hp <= 0) { triggerDeath(); return; }
+
+  // ── Ensure nearby chunks are generated ──
+  const [ccx, ccy] = getChunkCoords(player.x, player.y);
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) generateChunk(ccx+dx, ccy+dy);
+
+  // ── Render ──
+  bctx.clearRect(0, 0, RENDER_W, RENDER_H);
+  renderScene();
+  renderSprites();
+  drawVignette();
+  drawScanlines();
+  drawNoise();
+  drawHand();
+  drawHUD();
+
+  // Draw to main canvas
+  ctx.clearRect(0, 0, RENDER_W, RENDER_H);
+  ctx.drawImage(buf, 0, 0);
+}
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+const overlayEl = document.getElementById('overlay');
+
+overlayEl.addEventListener('click', () => {
+  overlayEl.style.display = 'none';
+  gameStarted = true;
+  lastTime = performance.now();
+  initAudio();
+  loadEyeImg();
+  generateChunk(0, 0);
+  spawnCrates();
+  entityStartTimer = setTimeout(() => { entity.active = true; }, ENTITY_START_DELAY);
+  requestAnimationFrame(gameLoop);
+});
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
