@@ -103,6 +103,10 @@ function initAudio() {
   loadAudio('static', 'static.mp3');
   loadAudio('friendTheme', 'friend-theme.mp3');
   loadAudio('friendScare', 'friend-scare.mp3');
+  loadAudio('zap', 'zap.mp3');
+  loadAudio('damage', 'damage.mp3');
+  loadAudio('hit', 'hit.mp3');
+  loadAudio('nature', 'nature.mp3');
 
   sounds.ambient.loop = true;
   sounds.ambient.volume = 0;
@@ -140,9 +144,46 @@ let musicPlaying = false;
 let walkTimer = 0;
 let heartbeatRecovery = null;
 
-// ─── Static / Kill-Eye Cutscene ───────────────────────────────────────────────
-let staticSequenceActive = false;
-let staticAlpha = 0; // 0=none, 1=full
+// ─── Game Stage ───────────────────────────────────────────────────────────────
+// 0 = normal (eye chasing), 1 = post-eye puzzle, 2 = distorted friend-hunt,
+// 3 = max-distortion find-exit, 4 = outside/ending
+let gameStage = 0;
+let distortLevel = 0; // 0=none, 1=mild, 2=heavy, 3=max
+
+// ─── Wire Boxes (stage 1 puzzle) ──────────────────────────────────────────────
+let wireBoxes = [];       // { x, y, hp:4, broken:false }
+let wireBoxesBroken = 0;  // count broken this stage
+const WIRE_BOXES_NEEDED = 3;
+let puzzleSolved = false;
+
+function spawnWireBoxes() {
+  wireBoxes = [];
+  // Place ~8 wire boxes in open cells far from spawn
+  for (let attempt = 0; attempt < 200 && wireBoxes.length < 8; attempt++) {
+    const wx = 3 + Math.floor(Math.random() * 30) * 2 + 0.5;
+    const wy = 3 + Math.floor(Math.random() * 30) * 2 + 0.5;
+    if (!isWall(wx, wy) && Math.sqrt((wx-1.5)**2+(wy-1.5)**2) > 5) {
+      wireBoxes.push({ x: wx, y: wy, hp: 4, broken: false });
+    }
+  }
+}
+
+// ─── Stage 2: Friend Hunt ──────────────────────────────────────────────────────
+let friendPos = { x: 20, y: 20 };
+let friendImg = null;
+let friendFound = false;
+let friendFlickerActive = false;
+let friendFlickerTimer = 0;
+let friendFlickerState = false; // true=friend, false=eye
+
+// ─── Stage 3: Distorted world + exit ──────────────────────────────────────────
+let exitPos = { x: 0, y: 0 };
+let outsideActive = false;
+let outsideFadeAlpha = 0;
+let naturePlaying = false;
+
+// ─── Damage sound throttle ────────────────────────────────────────────────────
+let damageTimer = 0;
 
 // ─── Friend Sequence ──────────────────────────────────────────────────────────
 let friendSequenceActive = false;
@@ -516,6 +557,27 @@ function handleAttack() {
   punchAnim = 1.0;
   playPunch();
 
+  // Stage 1: Wire box interaction
+  if (gameStage === 1) {
+    for (let i = 0; i < wireBoxes.length; i++) {
+      const wb = wireBoxes[i];
+      if (wb.broken) continue;
+      const dx = wb.x - player.x, dy = wb.y - player.y;
+      if (Math.sqrt(dx*dx+dy*dy) < 1.8 && weaponSlot && weaponSlot.type === 'knife') {
+        wb.hp--;
+        if (sounds.zap) { sounds.zap.currentTime = 0; sounds.zap.play().catch(()=>{}); }
+        weaponSlot.durability--;
+        if (weaponSlot.durability <= 0) weaponSlot = null;
+        if (wb.hp <= 0) {
+          wb.broken = true;
+          wireBoxesBroken++;
+          if (wireBoxesBroken >= WIRE_BOXES_NEEDED) puzzleSolved = true;
+        }
+        return;
+      }
+    }
+  }
+
   // Check crate interaction first
   for (let i = 0; i < crates.length; i++) {
     const cr = crates[i];
@@ -548,8 +610,9 @@ function handleAttack() {
   if (!entity.dead && entity.active && entity.dist < 2.0 && getMainHand() && getMainHand().type === 'knife') {
     weaponSlot.durability--;
     entity.hp--;
+    if (sounds.hit) { sounds.hit.currentTime = 0; sounds.hit.play().catch(()=>{}); }
     if (entity.hp <= 0) killEntity();
-    if (weaponSlot.durability <= 0) weaponSlot = null;
+    if (weaponSlot && weaponSlot.durability <= 0) weaponSlot = null;
     return;
   }
 
@@ -642,23 +705,151 @@ function runCutscene(staticEl, textEl) {
           if (sounds.heartbeat) sounds.heartbeat.volume = 0.5;
           // Reset game but keep eyeKilled = true (no more eyes)
           eyeKilled = true;
+          gameStage = 1;
           staticSequenceActive = false;
           playerFrozen = false;
           friendThemeTimer = 0;
           friendThemeStarted = false;
-          // Full reset except eyeKilled flag
+          // Full reset except eyeKilled/gameStage flags
           player = { x: 1.5, y: 1.5, angle: 0, hp: 100, maxHp: 100 };
           weaponSlot = null; foodSlot = null; slotsSwapped = false;
           entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
           entityPath = [];
           bloodSplats = [];
+          wireBoxesBroken = 0; puzzleSolved = false;
           chunks.clear(); crates = [];
           generateChunk(0, 0);
+          spawnWireBoxes();
           gamePlayTime = 0;
         }, 800);
       }, 3000);
     }, 2000);
   }, 3000);
+}
+
+function applyAudioDistortion(level) {
+  // level 1 = mild, 2 = heavy, 3 = max
+  const rates = [1, 0.85, 0.6, 0.3];
+  const rate = rates[Math.min(level, 3)];
+  ['ambient','heartbeat','music','walk','punch'].forEach(k => {
+    if (sounds[k]) sounds[k].playbackRate = rate + (Math.random() * 0.1 - 0.05);
+  });
+}
+
+// ─── Stage 2: Friend Hunt ──────────────────────────────────────────────────────
+function initFriendHunt() {
+  // Place friend somewhere far away
+  let fx, fy;
+  for (let i = 0; i < 200; i++) {
+    fx = 5 + Math.floor(Math.random() * 40) * 2 + 0.5;
+    fy = 5 + Math.floor(Math.random() * 40) * 2 + 0.5;
+    if (!isWall(fx, fy)) break;
+  }
+  friendPos = { x: fx, y: fy };
+  friendFound = false;
+  friendFlickerActive = false;
+  // Static volume based on distance
+  if (sounds.static) { sounds.static.volume = 0; sounds.static.play().catch(()=>{}); }
+}
+
+function updateFriendHunt(dt) {
+  if (gameStage !== 2) return;
+  const dx = friendPos.x - player.x, dy = friendPos.y - player.y;
+  const dist = Math.sqrt(dx*dx+dy*dy);
+  // Static and heartbeat scale with proximity (max at dist 3)
+  const t = Math.max(0, Math.min(1, 1 - (dist - 1) / 25));
+  if (sounds.static) sounds.static.volume = t * 0.9;
+  heartbeatTargetVol  = 0.3 + t * 0.7;
+  heartbeatTargetRate = 1.0 + t * 1.2;
+
+  // Player walks into friend
+  if (dist < 0.8 && !friendFlickerActive) {
+    friendFlickerActive = true;
+    playerFrozen = true;
+    sounds.friendScare.currentTime = 0;
+    sounds.friendScare.play().catch(()=>{}); 
+    let flickers = 0;
+    const flickerInterval = setInterval(() => {
+      friendFlickerState = !friendFlickerState;
+      flickers++;
+      if (flickers >= 20) { // 1 second at 50ms
+        clearInterval(flickerInterval);
+        enterMaxDistortMenu();
+      }
+    }, 50);
+  }
+}
+
+function enterMaxDistortMenu() {
+  distortLevel = 3;
+  gameStage = 3;
+  friendFlickerActive = false;
+  playerFrozen = false;
+  dead = false;
+  gameStarted = false;
+  ['ambient','heartbeat','static','friendTheme','music'].forEach(k => {
+    if (sounds[k]) { sounds[k].pause(); sounds[k].currentTime = 0; sounds[k].volume = 0; }
+  });
+  applyAudioDistortion(3);
+  // Place exit somewhere in the maze
+  for (let i = 0; i < 300; i++) {
+    const ex = 10 + Math.floor(Math.random() * 50) * 2 + 0.5;
+    const ey = 10 + Math.floor(Math.random() * 50) * 2 + 0.5;
+    if (!isWall(ex, ey)) { exitPos = { x: ex, y: ey }; break; }
+  }
+  document.getElementById('overlay').style.display = 'flex';
+  animateTitle();
+}
+
+function checkExitReached() {
+  if (gameStage !== 3) return;
+  const dx = exitPos.x - player.x, dy = exitPos.y - player.y;
+  if (Math.sqrt(dx*dx+dy*dy) < 1.2) triggerOutside();
+}
+
+function triggerOutside() {
+  outsideActive = true;
+  playerFrozen = true;
+  gameStage = 4;
+  // Stop all horror audio
+  ['ambient','heartbeat','static','music'].forEach(k => {
+    if (sounds[k]) { sounds[k].pause(); sounds[k].currentTime = 0; sounds[k].volume = 0; }
+  });
+  if (sounds.nature) { sounds.nature.loop = true; sounds.nature.volume = 0; sounds.nature.play().catch(()=>{}); }
+  naturePlaying = true;
+  // Fade nature in
+  let nv = 0;
+  const ni = setInterval(() => {
+    nv = Math.min(1, nv + 0.02);
+    if (sounds.nature) sounds.nature.volume = nv;
+    if (nv >= 1) clearInterval(ni);
+  }, 100);
+  // Show outside scene then fade to black with ending
+  setTimeout(() => {
+    showEndingScreen();
+  }, 5000);
+}
+
+function showEndingScreen() {
+  const endEl = document.createElement('div');
+  endEl.id = 'endScreen';
+  endEl.style.cssText = 'position:fixed;inset:0;background:#000;z-index:700;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity 2s;';
+  const msg = document.createElement('canvas');
+  msg.width = 320; msg.height = 120;
+  msg.style.cssText = 'image-rendering:pixelated;width:640px;height:240px;';
+  endEl.appendChild(msg);
+  const btn = document.createElement('button');
+  btn.textContent = 'PLAY AGAIN?';
+  btn.style.cssText = 'margin-top:2rem;background:#000;color:#0f0;border:2px solid #0f0;padding:0.5rem 1.5rem;font-family:monospace;font-size:1rem;cursor:pointer;image-rendering:pixelated;';
+  btn.onclick = () => location.reload();
+  endEl.appendChild(btn);
+  document.body.appendChild(endEl);
+  // Draw pixelated "CONGRATS ON ESCAPING!"
+  const ec = msg.getContext('2d');
+  ec.fillStyle = '#000'; ec.fillRect(0,0,320,120);
+  drawPixelString(ec, 'CONGRATS ON', 10, 20, 3, 3, 2, '#00ff00');
+  drawPixelString(ec, 'ESCAPING!', 30, 55, 3, 3, 2, '#00ff00');
+  requestAnimationFrame(() => { endEl.style.opacity = '1'; });
 }
 
 // ─── Friend Sequence ──────────────────────────────────────────────────────────
@@ -691,27 +882,52 @@ function triggerFriendScare() {
   friendScareActive = true;
   friendSequenceActive = true;
   playerFrozen = true;
-  // Stop friend theme
   sounds.friendTheme.pause();
   sounds.friendTheme.currentTime = 0;
-  // Play friend scare sound
   sounds.friendScare.currentTime = 0;
   sounds.friendScare.play().catch(()=>{});
-  // Show friend jumpscare for 1 second
   const fEl = document.getElementById('friendScare');
   fEl.style.display = 'flex';
   setTimeout(() => {
     fEl.style.display = 'none';
-    // Player falls — screen shakes, blood fills sides, hp drains
-    shakeIntensity = 8;
-    heartbeatTargetVol = 1.0;
-    heartbeatTargetRate = 2.0;
-    // Spawn eye approaching from distance
-    entity = { x: player.x + 15, y: player.y + 15, active: true, dist: 999, hp: 3, dead: false };
-    entityPath = [];
-    // Wait for eye to reach player (handled in updateEntity — when dist < 0.5 it kills)
-    // Override: once eye reaches, force death
+    if (puzzleSolved) {
+      // Puzzle solved — flash black 3s then go to distorted menu (stage 2)
+      const blackEl = document.createElement('div');
+      blackEl.style.cssText = 'position:fixed;inset:0;background:#000;z-index:600;';
+      document.body.appendChild(blackEl);
+      setTimeout(() => {
+        document.body.removeChild(blackEl);
+        enterDistortedMenu();
+      }, 3000);
+    } else {
+      // Puzzle failed — shake, drain HP, eye kills
+      shakeIntensity = 8;
+      heartbeatTargetVol = 1.0;
+      heartbeatTargetRate = 2.0;
+      entity = { x: player.x + 15, y: player.y + 15, active: true, dist: 999, hp: 3, dead: false };
+      entityPath = [];
+    }
   }, 1000);
+}
+
+function enterDistortedMenu() {
+  // Reset to menu with distortLevel=1
+  distortLevel = 1;
+  gameStage = 2;
+  friendScareActive = false;
+  friendSequenceActive = false;
+  playerFrozen = false;
+  dead = false;
+  gameStarted = false;
+  // Stop all game audio
+  ['ambient','heartbeat','static','friendTheme'].forEach(k => {
+    if (sounds[k]) { sounds[k].pause(); sounds[k].currentTime = 0; sounds[k].volume = 0; }
+  });
+  // Apply audio distortion
+  applyAudioDistortion(1);
+  // Show distorted title
+  document.getElementById('overlay').style.display = 'flex';
+  animateTitle();
 }
 
 // ─── Raycasting ───────────────────────────────────────────────────────────────
@@ -812,6 +1028,36 @@ function renderScene() {
   bctx.putImageData(imgData, 0, 0);
 }
 
+// ─── Pixel Font Helper ────────────────────────────────────────────────────────
+const PIXEL_FONT = {
+  'A':[[0,1,0],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],'B':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,1,0]],
+  'C':[[0,1,1],[1,0,0],[1,0,0],[1,0,0],[0,1,1]],'D':[[1,1,0],[1,0,1],[1,0,1],[1,0,1],[1,1,0]],
+  'E':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,1,1]],'F':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,0,0]],
+  'G':[[0,1,1],[1,0,0],[1,0,1],[1,0,1],[0,1,1]],'H':[[1,0,1],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],
+  'I':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[1,1,1]],'J':[[0,0,1],[0,0,1],[0,0,1],[1,0,1],[0,1,0]],
+  'K':[[1,0,1],[1,1,0],[1,0,0],[1,1,0],[1,0,1]],'L':[[1,0,0],[1,0,0],[1,0,0],[1,0,0],[1,1,1]],
+  'M':[[1,0,1],[1,1,1],[1,0,1],[1,0,1],[1,0,1]],'N':[[1,0,1],[1,1,1],[1,1,1],[1,0,1],[1,0,1]],
+  'O':[[0,1,0],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],'P':[[1,1,0],[1,0,1],[1,1,0],[1,0,0],[1,0,0]],
+  'Q':[[0,1,0],[1,0,1],[1,0,1],[1,1,1],[0,1,1]],'R':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,0,1]],
+  'S':[[0,1,1],[1,0,0],[0,1,0],[0,0,1],[1,1,0]],'T':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[0,1,0]],
+  'U':[[1,0,1],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],'V':[[1,0,1],[1,0,1],[1,0,1],[0,1,0],[0,1,0]],
+  'W':[[1,0,1],[1,0,1],[1,0,1],[1,1,1],[1,0,1]],'X':[[1,0,1],[1,0,1],[0,1,0],[1,0,1],[1,0,1]],
+  'Y':[[1,0,1],[1,0,1],[0,1,0],[0,1,0],[0,1,0]],'Z':[[1,1,1],[0,0,1],[0,1,0],[1,0,0],[1,1,1]],
+  '!':[[0,1,0],[0,1,0],[0,1,0],[0,0,0],[0,1,0]],'?':[[0,1,0],[1,0,1],[0,0,1],[0,1,0],[0,1,0]],
+  ' ':[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]],
+};
+function drawPixelString(ctx2, text, sx, sy, cw, ch, gap, color) {
+  let cx = sx;
+  for (const ch2 of text.toUpperCase()) {
+    const map = PIXEL_FONT[ch2] || PIXEL_FONT[' '];
+    ctx2.fillStyle = color;
+    for (let row = 0; row < 5; row++)
+      for (let col = 0; col < 3; col++)
+        if (map[row][col]) ctx2.fillRect(cx + col*cw, sy + row*ch, cw, ch);
+    cx += 3*cw + gap;
+  }
+}
+
 // ─── Sprite Rendering ─────────────────────────────────────────────────────────
 let eyeImg = null;
 function loadEyeImg() {
@@ -820,26 +1066,42 @@ function loadEyeImg() {
 }
 
 function renderSprites() {
-  // Collect sprites: blood splats + entity + crates
   const sprites = [];
 
-  // Blood splats as floor sprites
   for (const sp of bloodSplats) {
     const dx = sp.x - player.x, dy = sp.y - player.y;
-    const dist = Math.sqrt(dx*dx+dy*dy);
-    sprites.push({ x: sp.x, y: sp.y, dist, type: 'blood', data: sp });
+    sprites.push({ x: sp.x, y: sp.y, dist: Math.sqrt(dx*dx+dy*dy), type: 'blood', data: sp });
   }
 
   if (!entity.dead) {
     const dx = entity.x - player.x, dy = entity.y - player.y;
-    const dist = Math.sqrt(dx*dx+dy*dy);
-    sprites.push({ x: entity.x, y: entity.y, dist, type: 'entity' });
+    sprites.push({ x: entity.x, y: entity.y, dist: Math.sqrt(dx*dx+dy*dy), type: 'entity' });
   }
 
   for (const cr of crates) {
     const dx = cr.x - player.x, dy = cr.y - player.y;
-    const dist = Math.sqrt(dx*dx+dy*dy);
-    sprites.push({ x: cr.x, y: cr.y, dist, type: cr.open ? 'crateOpen' : 'crate' });
+    sprites.push({ x: cr.x, y: cr.y, dist: Math.sqrt(dx*dx+dy*dy), type: cr.open ? 'crateOpen' : 'crate' });
+  }
+
+  // Wire boxes (stage 1)
+  if (gameStage === 1) {
+    for (const wb of wireBoxes) {
+      if (wb.broken) continue;
+      const dx = wb.x - player.x, dy = wb.y - player.y;
+      sprites.push({ x: wb.x, y: wb.y, dist: Math.sqrt(dx*dx+dy*dy), type: 'wirebox', data: wb });
+    }
+  }
+
+  // Friend sprite (stage 2)
+  if (gameStage === 2 && !friendFlickerActive) {
+    const dx = friendPos.x - player.x, dy = friendPos.y - player.y;
+    sprites.push({ x: friendPos.x, y: friendPos.y, dist: Math.sqrt(dx*dx+dy*dy), type: 'friend' });
+  }
+
+  // Exit arch (stage 3)
+  if (gameStage === 3) {
+    const dx = exitPos.x - player.x, dy = exitPos.y - player.y;
+    sprites.push({ x: exitPos.x, y: exitPos.y, dist: Math.sqrt(dx*dx+dy*dy), type: 'exit' });
   }
 
   sprites.sort((a, b) => b.dist - a.dist);
@@ -925,6 +1187,75 @@ function renderSprites() {
       }
       if (anyVis) drawCrateSprite(bctx, drawX, drawY, spriteW, spriteH, sp.type === 'crateOpen');
       bctx.restore();
+    } else if (sp.type === 'wirebox') {
+      const startCol = Math.max(0, drawX | 0), endCol = Math.min(RENDER_W-1, (drawX+spriteW)|0);
+      let anyVis = false;
+      for (let c = startCol; c <= endCol; c++) if (zBuffer[c] > dist) { anyVis = true; break; }
+      if (!anyVis) continue;
+      bctx.save();
+      bctx.globalAlpha = Math.max(0.1, fog * lightLevel);
+      bctx.beginPath();
+      for (let c = startCol; c <= endCol; c++) if (zBuffer[c] > dist) bctx.rect(c, 0, 1, RENDER_H);
+      bctx.clip();
+      // Draw gray wire box
+      const bh2 = spriteH * 0.5, by2 = drawY + spriteH * 0.25;
+      bctx.fillStyle = '#888'; bctx.fillRect(drawX, by2, spriteW, bh2);
+      bctx.fillStyle = '#555'; bctx.fillRect(drawX, by2, spriteW, bh2*0.1);
+      bctx.fillRect(drawX, by2+bh2*0.9, spriteW, bh2*0.1);
+      // Wires
+      bctx.strokeStyle = '#f80'; bctx.lineWidth = 1;
+      for (let w = 0; w < 3; w++) {
+        bctx.beginPath();
+        bctx.moveTo(drawX + spriteW*(0.2+w*0.25), by2);
+        bctx.lineTo(drawX + spriteW*(0.2+w*0.25), by2+bh2);
+        bctx.stroke();
+      }
+      // HP indicator
+      const hpFrac = sp.data.hp / 4;
+      bctx.fillStyle = `rgb(${255-hpFrac*255|0},${hpFrac*255|0},0)`;
+      bctx.fillRect(drawX, by2-3, spriteW * hpFrac, 2);
+      bctx.restore();
+    } else if (sp.type === 'friend') {
+      if (!friendImg || !friendImg.complete) continue;
+      const startCol = Math.max(0, drawX|0), endCol = Math.min(RENDER_W-1, (drawX+spriteW)|0);
+      let anyVis = false;
+      for (let c = startCol; c <= endCol; c++) if (zBuffer[c] > dist) { anyVis = true; break; }
+      if (!anyVis) continue;
+      bctx.save();
+      bctx.globalAlpha = fog;
+      // Flicker between friend and eye if flickering
+      const imgToDraw = (friendFlickerActive && friendFlickerState) ? eyeImg : friendImg;
+      if (imgToDraw && imgToDraw.complete) bctx.drawImage(imgToDraw, drawX, drawY, spriteW, spriteH);
+      bctx.restore();
+    } else if (sp.type === 'exit') {
+      const startCol = Math.max(0, drawX|0), endCol = Math.min(RENDER_W-1, (drawX+spriteW)|0);
+      let anyVis = false;
+      for (let c = startCol; c <= endCol; c++) if (zBuffer[c] > dist) { anyVis = true; break; }
+      if (!anyVis) continue;
+      bctx.save();
+      bctx.globalAlpha = fog;
+      // Draw archway with warm light
+      const aw = spriteW, ah = spriteH;
+      // Arch frame
+      bctx.fillStyle = '#5a4020'; bctx.fillRect(drawX, drawY, aw*0.15, ah);
+      bctx.fillRect(drawX+aw*0.85, drawY, aw*0.15, ah);
+      bctx.fillRect(drawX, drawY, aw, ah*0.1);
+      // Arch top curve (pixelated)
+      bctx.fillStyle = '#4a3010';
+      for (let i = 0; i < 8; i++) {
+        const t2 = i/8, angle2 = Math.PI * t2;
+        const ax = drawX + aw/2 + Math.cos(angle2)*aw*0.35;
+        const ay = drawY + ah*0.1 + (1-Math.sin(angle2))*ah*0.3;
+        bctx.fillRect(ax|0, ay|0, (aw*0.15)|0, (ah*0.05)|0);
+      }
+      // Interior — warm yellow/green light
+      const exitGrad = bctx.createLinearGradient(drawX+aw*0.15, 0, drawX+aw*0.85, 0);
+      exitGrad.addColorStop(0, 'rgba(200,220,100,0.9)');
+      exitGrad.addColorStop(0.5, 'rgba(255,255,180,1)');
+      exitGrad.addColorStop(1, 'rgba(200,220,100,0.9)');
+      bctx.fillStyle = exitGrad;
+      bctx.fillRect(drawX+aw*0.15, drawY+ah*0.1, aw*0.7, ah*0.9);
+      bctx.restore();
     }
   }
 }
@@ -991,11 +1322,13 @@ function drawHUD() {
   bctx.fillRect(slotX2+1, slotY+1, slotSize-2, slotSize-2);
   if (offItem) drawItemIcon(bctx, offItem, slotX2+2, slotY+2, slotSize-4);
 
-  // Labels
-  bctx.fillStyle = '#555';
-  bctx.font = '5px monospace';
-  bctx.fillText('MAIN', slotX1+2, slotY + slotSize + 6);
-  bctx.fillText('OFF', slotX2+3, slotY + slotSize + 6);
+  // Stage 1 puzzle counter
+  if (gameStage === 1) {
+    const col = puzzleSolved ? '#0f0' : '#ff0';
+    bctx.fillStyle = col;
+    bctx.font = '6px monospace';
+    bctx.fillText(`BOXES: ${wireBoxesBroken}/${WIRE_BOXES_NEEDED}`, RENDER_W - 70, hudY + 10);
+  }
 }
 
 function drawItemIcon(ctx2, item, x, y, size) {
@@ -1270,6 +1603,11 @@ function resetGame() {
   gamePlayTime = 0;
   staticSequenceActive = false;
   staticAlpha = 0;
+  gameStage = 0;
+  distortLevel = 0;
+  wireBoxes = []; wireBoxesBroken = 0; puzzleSolved = false;
+  friendFound = false; friendFlickerActive = false;
+  outsideActive = false; outsideFadeAlpha = 0; naturePlaying = false;
   heartbeatTargetVol = 0.5;
   heartbeatTargetRate = 1.0;
   if (sounds.static)      { sounds.static.pause(); sounds.static.currentTime = 0; sounds.static.volume = 0; }
@@ -1328,6 +1666,15 @@ function gameLoop(ts) {
   applyHeartbeat(dt);
   updateLighting(dt, ts);
   updateFriendSequence(dt);
+  updateFriendHunt(dt);
+  checkExitReached();
+
+  // ── Damage sound ──
+  damageTimer -= dt;
+  if (player.hp < player.maxHp && damageTimer <= 0) {
+    damageTimer = 1.0;
+    if (sounds.damage) { sounds.damage.currentTime = 0; sounds.damage.play().catch(()=>{}); }
+  }
 
   // ── Friend scare: drain HP ──
   if (friendScareActive && !dead) {
@@ -1361,9 +1708,98 @@ function gameLoop(ts) {
 
   if (sx || sy) bctx.restore();
 
+  // ── Distortion overlay (stages 2-3) ──
+  if (distortLevel > 0) applyDistortionEffect(distortLevel);
+
+  // ── Outside scene overlay (stage 4) ──
+  if (outsideActive) renderOutside();
+
   // Draw to main canvas
   ctx.clearRect(0, 0, RENDER_W, RENDER_H);
   ctx.drawImage(buf, 0, 0);
+}
+
+function applyDistortionEffect(level) {
+  const imgData = bctx.getImageData(0, 0, RENDER_W, RENDER_H);
+  const d = imgData.data;
+  const intensity = level * 15;
+  // Glitch: randomly shift rows
+  for (let y = 0; y < RENDER_H; y++) {
+    if (Math.random() < level * 0.08) {
+      const shift = ((Math.random() - 0.5) * intensity) | 0;
+      const row = new Uint8ClampedArray(RENDER_W * 4);
+      for (let x = 0; x < RENDER_W; x++) {
+        const si = (y * RENDER_W + x) * 4;
+        row[x*4] = d[si]; row[x*4+1] = d[si+1]; row[x*4+2] = d[si+2]; row[x*4+3] = d[si+3];
+      }
+      for (let x = 0; x < RENDER_W; x++) {
+        const tx = ((x + shift) % RENDER_W + RENDER_W) % RENDER_W;
+        const di = (y * RENDER_W + tx) * 4;
+        d[di] = row[x*4]; d[di+1] = row[x*4+1]; d[di+2] = row[x*4+2]; d[di+3] = row[x*4+3];
+      }
+    }
+    // Color channel shift at max distortion
+    if (level >= 3 && Math.random() < 0.05) {
+      for (let x = 0; x < RENDER_W; x++) {
+        const i = (y * RENDER_W + x) * 4;
+        const tmp = d[i]; d[i] = d[i+2]; d[i+2] = tmp; // swap R and B
+      }
+    }
+  }
+  // Random color corruption at level 3
+  if (level >= 3) {
+    for (let i = 0; i < d.length; i += 4) {
+      if (Math.random() < 0.003) {
+        d[i] = Math.random()*255|0; d[i+1] = Math.random()*255|0; d[i+2] = Math.random()*255|0;
+      }
+    }
+  }
+  bctx.putImageData(imgData, 0, 0);
+}
+
+function renderOutside() {
+  // Draw a bright outdoor scene over the buffer
+  outsideFadeAlpha = Math.min(1, outsideFadeAlpha + 0.005);
+  bctx.save();
+  bctx.globalAlpha = outsideFadeAlpha;
+  // Sky
+  const skyGrad = bctx.createLinearGradient(0, 0, 0, RENDER_H * 0.6);
+  skyGrad.addColorStop(0, '#87ceeb'); skyGrad.addColorStop(1, '#c8e8ff');
+  bctx.fillStyle = skyGrad; bctx.fillRect(0, 0, RENDER_W, RENDER_H * 0.6);
+  // Ground
+  const groundGrad = bctx.createLinearGradient(0, RENDER_H*0.6, 0, RENDER_H);
+  groundGrad.addColorStop(0, '#4a8c2a'); groundGrad.addColorStop(1, '#2d5c15');
+  bctx.fillStyle = groundGrad; bctx.fillRect(0, RENDER_H*0.6, RENDER_W, RENDER_H*0.4);
+  // Sun
+  bctx.fillStyle = '#ffe066';
+  bctx.beginPath(); bctx.arc(260, 30, 18, 0, Math.PI*2); bctx.fill();
+  bctx.fillStyle = '#fff8aa';
+  bctx.beginPath(); bctx.arc(260, 30, 12, 0, Math.PI*2); bctx.fill();
+  // Trees (pixelated blocks)
+  const treePositions = [20,60,100,180,240,290];
+  for (const tx of treePositions) {
+    bctx.fillStyle = '#3a6b1a'; bctx.fillRect(tx, RENDER_H*0.35, 16, 30);
+    bctx.fillStyle = '#2d5210'; bctx.fillRect(tx+2, RENDER_H*0.3, 12, 20);
+    bctx.fillStyle = '#5a3010'; bctx.fillRect(tx+5, RENDER_H*0.6, 6, 15);
+  }
+  // Butterflies (tiny colored pixels)
+  const t = performance.now() * 0.001;
+  for (let b = 0; b < 5; b++) {
+    const bx = (50 + b*55 + Math.sin(t+b)*20) | 0;
+    const by = (RENDER_H*0.3 + Math.cos(t*1.3+b)*15) | 0;
+    bctx.fillStyle = b%2===0 ? '#ff88cc' : '#88ccff';
+    bctx.fillRect(bx, by, 3, 2); bctx.fillRect(bx+4, by, 3, 2);
+    bctx.fillStyle = '#ffff00'; bctx.fillRect(bx+2, by+1, 2, 3);
+  }
+  // Warehouse behind (distorted ugly)
+  bctx.fillStyle = '#3a2a1a';
+  bctx.fillRect(0, RENDER_H*0.45, 80, RENDER_H*0.2);
+  bctx.fillRect(240, RENDER_H*0.45, 80, RENDER_H*0.2);
+  // Scanlines on outside too
+  for (let y = 0; y < RENDER_H; y += 3) {
+    bctx.fillStyle = 'rgba(0,0,0,0.05)'; bctx.fillRect(0, y, RENDER_W, 1);
+  }
+  bctx.restore();
 }
 
 // ─── Title Screen ─────────────────────────────────────────────────────────────
@@ -1388,70 +1824,47 @@ function drawTitleScreen() {
 
   // "VORTARIUM PRODUCTIONS" — white/gray gradient, pixelated block letters
   function pixelText(text, startX, startY, charW, charH, gap, colors) {
-    // Simple 3x5 pixel font map
-    const font = {
-      'A':[[0,1,0],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],
-      'B':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,1,0]],
-      'C':[[0,1,1],[1,0,0],[1,0,0],[1,0,0],[0,1,1]],
-      'D':[[1,1,0],[1,0,1],[1,0,1],[1,0,1],[1,1,0]],
-      'E':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,1,1]],
-      'F':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,0,0]],
-      'G':[[0,1,1],[1,0,0],[1,0,1],[1,0,1],[0,1,1]],
-      'H':[[1,0,1],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],
-      'I':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[1,1,1]],
-      'J':[[0,0,1],[0,0,1],[0,0,1],[1,0,1],[0,1,0]],
-      'K':[[1,0,1],[1,1,0],[1,0,0],[1,1,0],[1,0,1]],
-      'L':[[1,0,0],[1,0,0],[1,0,0],[1,0,0],[1,1,1]],
-      'M':[[1,0,1],[1,1,1],[1,0,1],[1,0,1],[1,0,1]],
-      'N':[[1,0,1],[1,1,1],[1,1,1],[1,0,1],[1,0,1]],
-      'O':[[0,1,0],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],
-      'P':[[1,1,0],[1,0,1],[1,1,0],[1,0,0],[1,0,0]],
-      'Q':[[0,1,0],[1,0,1],[1,0,1],[1,1,1],[0,1,1]],
-      'R':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,0,1]],
-      'S':[[0,1,1],[1,0,0],[0,1,0],[0,0,1],[1,1,0]],
-      'T':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[0,1,0]],
-      'U':[[1,0,1],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],
-      'V':[[1,0,1],[1,0,1],[1,0,1],[0,1,0],[0,1,0]],
-      'W':[[1,0,1],[1,0,1],[1,0,1],[1,1,1],[1,0,1]],
-      'X':[[1,0,1],[1,0,1],[0,1,0],[1,0,1],[1,0,1]],
-      'Y':[[1,0,1],[1,0,1],[0,1,0],[0,1,0],[0,1,0]],
-      'Z':[[1,1,1],[0,0,1],[0,1,0],[1,0,0],[1,1,1]],
-      ' ':[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]],
-    };
     let cx = startX;
     for (let ci = 0; ci < text.length; ci++) {
       const ch = text[ci].toUpperCase();
-      const map = font[ch] || font[' '];
-      const col = colors[Math.floor(ci / text.length * colors.length)];
-      for (let row = 0; row < 5; row++) {
-        for (let col2 = 0; col2 < 3; col2++) {
-          if (map[row][col2]) {
-            tx.fillStyle = col;
-            tx.fillRect(cx + col2 * charW, startY + row * charH, charW, charH);
-          }
-        }
-      }
-      cx += 3 * charW + gap;
+      const map = PIXEL_FONT[ch] || PIXEL_FONT[' '];
+      const col = colors[Math.min(ci, colors.length-1)];
+      tx.fillStyle = col;
+      for (let row = 0; row < 5; row++)
+        for (let col2 = 0; col2 < 3; col2++)
+          if (map[row][col2]) tx.fillRect(cx + col2*charW, startY + row*charH, charW, charH);
+      cx += 3*charW + gap;
     }
   }
 
-  // Gradient colors white→gray
+  // Gradient colors white→gray (distorted in higher stages)
   const gradColors = [];
   const txt = 'VORTARIUM PRODUCTIONS';
   for (let i = 0; i < txt.length; i++) {
-    const v = Math.floor(255 - (i / txt.length) * 120);
-    gradColors.push(`rgb(${v},${v},${v})`);
+    let v = Math.floor(255 - (i / txt.length) * 120);
+    if (distortLevel >= 1) v = (v + (Math.random()*60-30)) | 0;
+    gradColors.push(distortLevel >= 3
+      ? `rgb(${Math.random()*255|0},${Math.random()*255|0},${Math.random()*255|0})`
+      : `rgb(${v},${v},${v})`);
   }
-  pixelText('VORTARIUM', 18, 30, 3, 3, 2, gradColors);
-  pixelText('PRODUCTIONS', 10, 60, 3, 3, 2, gradColors.slice(9));
+  const vx = distortLevel >= 1 ? 18 + (Math.random()*6-3)|0 : 18;
+  const px = distortLevel >= 1 ? 10 + (Math.random()*6-3)|0 : 10;
+  pixelText('VORTARIUM', vx, 30, 3, 3, 2, gradColors);
+  pixelText('PRODUCTIONS', px, 60, 3, 3, 2, gradColors.slice(9));
 
-  // "THE EYE" title — big red
+  // "THE EYE" title — big red (distorted in higher stages)
   const titleColors = [];
   for (let i = 0; i < 7; i++) {
-    const r = 180 + Math.floor(i / 7 * 75);
-    titleColors.push(`rgb(${r},0,0)`);
+    if (distortLevel >= 3) {
+      titleColors.push(`rgb(${Math.random()*255|0},${Math.random()*100|0},${Math.random()*100|0})`);
+    } else {
+      const r = 180 + Math.floor(i / 7 * 75);
+      titleColors.push(`rgb(${r},0,0)`);
+    }
   }
-  pixelText('THE EYE', 60, 100, 5, 5, 3, titleColors);
+  const titleX = distortLevel >= 1 ? 60 + (Math.random()*8-4)|0 : 60;
+  const titleY = distortLevel >= 1 ? 100 + (Math.random()*6-3)|0 : 100;
+  pixelText('THE EYE', titleX, titleY, 5, 5, 3, titleColors);
 
   // "CLICK TO ENTER" blinking — draw static (blink handled by redraw)
   const blink = Math.floor(Date.now() / 600) % 2 === 0;
@@ -1512,10 +1925,63 @@ overlayEl.addEventListener('click', () => {
   overlayEl.style.display = 'none';
   gameStarted = true;
   lastTime = performance.now();
-  initAudio();
-  loadEyeImg();
-  generateChunk(0, 0);
-  entityStartTimer = setTimeout(() => { entity.active = true; }, ENTITY_START_DELAY);
+
+  if (!sounds.ambient) {
+    initAudio();
+    loadEyeImg();
+    if (!friendImg) { friendImg = new Image(); friendImg.src = 'friend.png'; }
+  }
+
+  if (gameStage === 2) {
+    // Stage 2: friend hunt — reset world, no eye, place friend
+    player = { x: 1.5, y: 1.5, angle: 0, hp: 100, maxHp: 100 };
+    weaponSlot = null; foodSlot = null; slotsSwapped = false;
+    entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
+    entityPath = []; bloodSplats = []; dead = false; jumpscareActive = false;
+    playerFrozen = false; friendScareActive = false; friendSequenceActive = false;
+    friendThemeStarted = false; friendThemeTimer = 0; shakeIntensity = 0;
+    chunks.clear(); crates = [];
+    generateChunk(0, 0);
+    initFriendHunt();
+    // Restore audio with mild distortion
+    if (sounds.ambient) { sounds.ambient.volume = 0.4; sounds.ambient.play().catch(()=>{}); }
+    if (sounds.heartbeat) { sounds.heartbeat.volume = 0.3; sounds.heartbeat.play().catch(()=>{}); }
+    applyAudioDistortion(1);
+  } else if (gameStage === 3) {
+    // Stage 3: max distortion, find exit
+    player = { x: 1.5, y: 1.5, angle: 0, hp: 100, maxHp: 100 };
+    weaponSlot = null; foodSlot = null; slotsSwapped = false;
+    entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
+    entityPath = []; bloodSplats = []; dead = false; jumpscareActive = false;
+    playerFrozen = false; friendScareActive = false; friendSequenceActive = false;
+    shakeIntensity = 0;
+    chunks.clear(); crates = [];
+    generateChunk(0, 0);
+    // Place exit
+    for (let i = 0; i < 300; i++) {
+      const ex = 10 + Math.floor(Math.random()*50)*2+0.5;
+      const ey = 10 + Math.floor(Math.random()*50)*2+0.5;
+      if (!isWall(ex, ey)) { exitPos = { x: ex, y: ey }; break; }
+    }
+    if (sounds.ambient) { sounds.ambient.volume = 0.2; sounds.ambient.play().catch(()=>{}); }
+    if (sounds.heartbeat) { sounds.heartbeat.volume = 0.2; sounds.heartbeat.play().catch(()=>{}); }
+    applyAudioDistortion(3);
+  } else {
+    // Stage 0/1: normal start
+    generateChunk(0, 0);
+    entityStartTimer = setTimeout(() => { entity.active = true; }, ENTITY_START_DELAY);
+    if (sounds.ambient) { sounds.ambient.volume = 0; sounds.ambient.play().catch(()=>{}); }
+    if (sounds.heartbeat) { sounds.heartbeat.volume = 0; sounds.heartbeat.play().catch(()=>{}); }
+    if (sounds.static) { sounds.static.volume = 0; sounds.static.play().catch(()=>{}); }
+    let t = 0;
+    const fadeIn = setInterval(() => {
+      t += 0.05;
+      if (sounds.ambient) sounds.ambient.volume = Math.min(0.6, t*0.6/5);
+      if (sounds.heartbeat) sounds.heartbeat.volume = Math.min(0.5, t*0.5/5);
+      if (t >= 5) clearInterval(fadeIn);
+    }, 50);
+  }
+
   requestAnimationFrame(gameLoop);
 });
 
