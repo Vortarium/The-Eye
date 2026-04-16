@@ -159,15 +159,17 @@ let walkTimer = 0;
 let heartbeatRecovery = null;
 
 // ─── Stage / Progression ──────────────────────────────────────────────────────
-let gameStage = 1;        // 1=normal, 2=post-eye, 3=post-friend
+let gameStage = 1;        // 1=normal, 2=friend-hunt, 3=final-chaos
 let distortionLevel = 0;  // 0=none, 1=mild, 2=heavy
 let wireBoxes = [];
 let wireBoxesDestroyed = 0;
 let puzzleSolved = false;
 let friendEntity = null;
 let friendImg = null;
-let exitPortal = null;
-let damageTimer = 0;      // timer for damage.mp3 throttle
+let exitPortals = [];     // multiple exits in stage 3
+let entities3 = [];       // 3 eye entities in stage 3
+let damageTimer = 0;
+let gameStartTime = 0;    // for timing the full run
 
 // ─── Static / Kill-Eye Cutscene ───────────────────────────────────────────────
 let staticSequenceActive = false;
@@ -423,6 +425,15 @@ function generateChunk(cx, cy) {
           const wox = (hash(gx * 53 + cx, gy * 97 + cy) - 0.5) * 0.5;
           const woy = (hash(gx * 61 + cx, gy * 83 + cy) - 0.5) * 0.5;
           wireBoxes.push({ wx: wx + wox, wy: wy + woy, hp: 4, broken: false });
+        }
+      }
+      // ── Exit portals (stage 3 only) — same frequency as wire boxes ──
+      if (gameStage === 3) {
+        const eroll = hash(cx * 2741 + gx * 7, cy * 3571 + gy * 11);
+        if (eroll < 0.08) {
+          const eox = (hash(gx * 71 + cx, gy * 113 + cy) - 0.5) * 0.4;
+          const eoy = (hash(gx * 79 + cx, gy * 127 + cy) - 0.5) * 0.4;
+          exitPortals.push({ x: wx + eox, y: wy + eoy });
         }
       }
     }
@@ -782,8 +793,8 @@ function runCutscene(staticEl, textEl) {
 
 function spawnFriendEntity() {
   const candidates = [];
-  for (let cx = -3; cx <= 3; cx++) {
-    for (let cy = -3; cy <= 3; cy++) {
+  for (let cx = -2; cx <= 2; cx++) {
+    for (let cy = -2; cy <= 2; cy++) {
       generateChunk(cx, cy);
       const chunkW = CHUNK_SIZE * CELL;
       const originX = cx * chunkW, originY = cy * chunkW;
@@ -794,7 +805,8 @@ function spawnFriendEntity() {
           const wx = originX + gx + 0.5;
           const wy = originY + gy + 0.5;
           const dist = Math.sqrt((wx-1.5)*(wx-1.5)+(wy-1.5)*(wy-1.5));
-          if (dist > 15) candidates.push({ wx, wy });
+          // Close enough to hear but far enough to need to search: 8-18 units
+          if (dist >= 8 && dist <= 18) candidates.push({ wx, wy });
         }
       }
     }
@@ -803,7 +815,13 @@ function spawnFriendEntity() {
     const pick = candidates[Math.floor(Math.random() * candidates.length)];
     friendEntity = { x: pick.wx, y: pick.wy };
   } else {
-    friendEntity = { x: 20, y: 20 };
+    friendEntity = { x: 12, y: 12 };
+  }
+  // friend-theme loops as proximity audio in stage 2
+  if (sounds.friendTheme) {
+    sounds.friendTheme.loop = true;
+    sounds.friendTheme.volume = 0;
+    sounds.friendTheme.play().catch(()=>{});
   }
 }
 
@@ -913,20 +931,26 @@ function triggerFriendFlicker() {
   friendFlickerActive = true;
   playerFrozen = true;
   if (sounds.friendScare) { sounds.friendScare.currentTime = 0; sounds.friendScare.play().catch(()=>{}); }
-  const fEl = document.getElementById('friendScare');
+  const fEl  = document.getElementById('friendScare');
   const fImg = document.getElementById('friendScareImg');
   fEl.style.display = 'flex';
-  let count = 0;
+  fImg.style.opacity = '1';
+  let tick = 0;
+  // Cycle: friend → eye → black every 0.03s for 3 seconds
   const interval = setInterval(() => {
-    count++;
-    fImg.src = count % 2 === 0 ? 'friend.png' : 'eye.png';
-  }, 50);
+    tick++;
+    const phase = tick % 3;
+    if (phase === 0)      { fImg.src = 'friend.png'; fImg.style.opacity = '1'; }
+    else if (phase === 1) { fImg.src = 'eye.png';    fImg.style.opacity = '1'; }
+    else                  { fImg.style.opacity = '0'; }
+  }, 30);
   setTimeout(() => {
     clearInterval(interval);
     fEl.style.display = 'none';
-    gameStage = 3;
-    showMainMenu(2);
-  }, 1000);
+    fImg.style.opacity = '1';
+    fImg.src = 'friend.png';
+    showMainMenu(2); // distortionLevel=2, gameStage=3
+  }, 3000);
 }
 
 // ─── Ending Sequence ──────────────────────────────────────────────────────────
@@ -935,42 +959,67 @@ function triggerEnding() {
   if (endingTriggered) return;
   endingTriggered = true;
   playerFrozen = true;
+  const elapsed = Math.floor((performance.now() - gameStartTime) / 1000);
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const timeStr = `${mins}m ${secs}s`;
   // Stop all sounds
   for (const key of Object.keys(sounds)) {
     try { sounds[key].pause(); sounds[key].currentTime = 0; } catch(e) {}
   }
-  if (sounds.nature) { sounds.nature.loop = true; sounds.nature.volume = 0.8; sounds.nature.play().catch(()=>{}); }
-  // Fade canvas to white over 2 seconds
+  if (sounds.nature) { sounds.nature.loop = true; sounds.nature.volume = 0; sounds.nature.play().catch(()=>{}); }
+  // Fade to bright white (outside) over 2 seconds, nature fades in
   let fadeAlpha = 0;
   const fadeInterval = setInterval(() => {
     fadeAlpha = Math.min(1, fadeAlpha + 0.02);
-    bctx.fillStyle = `rgba(255,255,255,${fadeAlpha})`;
+    if (sounds.nature) sounds.nature.volume = Math.min(0.8, fadeAlpha * 0.8);
+    // Draw outdoor scene
+    bctx.fillStyle = `rgb(135,206,235)`; // sky blue
+    bctx.fillRect(0, 0, RENDER_W, RENDER_H * 0.6);
+    bctx.fillStyle = `rgb(80,160,60)`; // grass
+    bctx.fillRect(0, RENDER_H * 0.6, RENDER_W, RENDER_H * 0.4);
+    // Sun
+    bctx.fillStyle = '#ffe066';
+    bctx.beginPath(); bctx.arc(260, 30, 18, 0, Math.PI*2); bctx.fill();
+    // Trees (pixel style)
+    for (let t = 0; t < 5; t++) {
+      const tx2 = 20 + t * 60, ty2 = RENDER_H * 0.45;
+      bctx.fillStyle = '#4a2800'; bctx.fillRect(tx2+6, ty2+20, 8, 30);
+      bctx.fillStyle = '#228b22'; bctx.fillRect(tx2, ty2, 20, 24);
+      bctx.fillStyle = '#2ea82e'; bctx.fillRect(tx2+4, ty2-10, 12, 14);
+    }
+    // White fade overlay
+    bctx.fillStyle = `rgba(255,255,255,${Math.max(0, 0.8 - fadeAlpha)})`;
     bctx.fillRect(0, 0, RENDER_W, RENDER_H);
     ctx.clearRect(0, 0, RENDER_W, RENDER_H);
     ctx.drawImage(buf, 0, 0);
     if (fadeAlpha >= 1) {
       clearInterval(fadeInterval);
-      showEndScreen();
+      // Show end screen after 5 seconds of nature
+      setTimeout(() => showEndScreen(timeStr), 5000);
     }
   }, 40);
 }
 
-function showEndScreen() {
+function showEndScreen(timeStr) {
   const endEl = document.getElementById('endScreen');
   endEl.style.display = 'flex';
   const ec = document.getElementById('endCanvas');
   const ex = ec.getContext('2d');
-  ex.fillStyle = '#000';
-  ex.fillRect(0, 0, 320, 200);
-  // Draw "CONGRATS ON ESCAPING!" in green pixel font
-  ex.fillStyle = '#0f0';
-  ex.font = 'bold 14px monospace';
+  // Outdoor background
+  ex.fillStyle = '#87ceeb'; ex.fillRect(0, 0, 320, 120);
+  ex.fillStyle = '#50a03c'; ex.fillRect(0, 120, 320, 80);
+  ex.fillStyle = '#ffe066'; ex.beginPath(); ex.arc(260, 30, 14, 0, Math.PI*2); ex.fill();
+  // Pixel text
+  ex.fillStyle = '#003300';
+  ex.font = 'bold 11px monospace';
   ex.textAlign = 'center';
-  ex.fillText('CONGRATS ON ESCAPING!', 160, 100);
-  ex.font = '9px monospace';
-  ex.fillStyle = '#0a0';
-  ex.fillText('YOU MADE IT OUT.', 160, 125);
-  for (let y = 0; y < 200; y += 2) { ex.fillStyle = 'rgba(0,0,0,0.2)'; ex.fillRect(0, y, 320, 1); }
+  ex.fillText('CONGRATS ON ESCAPING!', 160, 90);
+  ex.font = '8px monospace';
+  ex.fillStyle = '#004400';
+  ex.fillText(`TIME: ${timeStr || '?'}`, 160, 108);
+  ex.fillText('YOU MADE IT OUT.', 160, 122);
+  for (let y = 0; y < 200; y += 2) { ex.fillStyle = 'rgba(0,0,0,0.1)'; ex.fillRect(0, y, 320, 1); }
 }
 
 // ─── Raycasting ───────────────────────────────────────────────────────────────
@@ -1070,7 +1119,29 @@ function renderScene() {
 
   bctx.putImageData(imgData, 0, 0);
 
-  // Stage 3: scanline glitch pass
+  // Stage 2: mild glitch pass
+  if (gameStage === 2) {
+    const g2 = bctx.getImageData(0, 0, RENDER_W, RENDER_H);
+    const g2d = g2.data;
+    const lc2 = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < lc2; i++) {
+      const gy2 = Math.floor(Math.random() * RENDER_H);
+      const shift2 = Math.floor((Math.random() - 0.5) * 12);
+      if (shift2 === 0) continue;
+      const rs = gy2 * RENDER_W * 4;
+      const rowCopy2 = g2d.slice(rs, rs + RENDER_W * 4);
+      for (let px = 0; px < RENDER_W; px++) {
+        const sp = ((px - shift2 + RENDER_W) % RENDER_W) * 4;
+        g2d[rs + px*4]   = rowCopy2[sp];
+        g2d[rs + px*4+1] = rowCopy2[sp+1];
+        g2d[rs + px*4+2] = rowCopy2[sp+2];
+        g2d[rs + px*4+3] = rowCopy2[sp+3];
+      }
+    }
+    bctx.putImageData(g2, 0, 0);
+  }
+
+  // Stage 3: heavy scanline glitch pass
   if (gameStage === 3) {
     const glitchData = bctx.getImageData(0, 0, RENDER_W, RENDER_H);
     const gd = glitchData.data;
@@ -1139,10 +1210,20 @@ function renderSprites() {
     sprites.push({ x: friendEntity.x, y: friendEntity.y, dist, type: 'friend' });
   }
 
-  if (gameStage >= 3 && exitPortal) {
-    const dx = exitPortal.x - player.x, dy = exitPortal.y - player.y;
+  if (gameStage >= 3 && exitPortals.length > 0) {
+    for (const ep of exitPortals) {
+      const dx = ep.x - player.x, dy = ep.y - player.y;
+      const dist = Math.sqrt(dx*dx+dy*dy);
+      sprites.push({ x: ep.x, y: ep.y, dist, type: 'exit' });
+    }
+  }
+
+  // Stage 3 eye entities
+  for (const e3 of entities3) {
+    if (!e3.active) continue;
+    const dx = e3.x - player.x, dy = e3.y - player.y;
     const dist = Math.sqrt(dx*dx+dy*dy);
-    sprites.push({ x: exitPortal.x, y: exitPortal.y, dist, type: 'exit' });
+    sprites.push({ x: e3.x, y: e3.y, dist, type: 'entity' });
   }
 
   sprites.sort((a, b) => b.dist - a.dist);
@@ -1397,8 +1478,8 @@ function drawHUD() {
   bctx.fillText('MAIN', slotX1+2, slotY + slotSize + 6);
   bctx.fillText('OFF', slotX2+3, slotY + slotSize + 6);
 
-  // Wire box counter (stage 2)
-  if (eyeKilled && !puzzleSolved) {
+  // Wire box counter (stage 2, only while puzzle not yet solved)
+  if (gameStage === 2 && eyeKilled && !puzzleSolved) {
     bctx.fillStyle = '#ff0';
     bctx.font = '7px monospace';
     bctx.fillText(`BOXES: ${wireBoxesDestroyed}/3`, 4, hudY - 4);
@@ -1686,9 +1767,9 @@ function resetGame() {
   heartbeatTargetVol = 0.5;
   heartbeatTargetRate = 1.0;
   wireBoxes = []; wireBoxesDestroyed = 0; puzzleSolved = false;
-  friendEntity = null; exitPortal = null; damageTimer = 0;
+  friendEntity = null; exitPortals = []; entities3 = []; damageTimer = 0; gameStartTime = 0;
   if (sounds.static)      { sounds.static.pause(); sounds.static.currentTime = 0; sounds.static.volume = 0; }
-  if (sounds.friendTheme) { sounds.friendTheme.pause(); sounds.friendTheme.currentTime = 0; }
+  if (sounds.friendTheme) { sounds.friendTheme.pause(); sounds.friendTheme.currentTime = 0; sounds.friendTheme.loop = false; }
   if (sounds.ambient)     sounds.ambient.volume = 0.6;
   if (sounds.heartbeat)   sounds.heartbeat.volume = 0.5;
   document.getElementById('staticOverlay').style.display = 'none';
@@ -1744,29 +1825,54 @@ function gameLoop(ts) {
   updateLighting(dt, ts);
   updateFriendSequence(dt);
 
-  // ── Stage 2: friend entity proximity ──
-  if (gameStage === 2 && friendEntity && !friendScareActive) {
+  // ── Stage 2: friend entity proximity (stationary, emits friend-theme) ──
+  if (gameStage === 2 && friendEntity && !friendScareActive && !friendFlickerActive) {
     const fdx = friendEntity.x - player.x, fdy = friendEntity.y - player.y;
     const fdist = Math.sqrt(fdx*fdx+fdy*fdy);
-    if (sounds.static) sounds.static.volume = Math.max(0, 1 - fdist/20);
-    heartbeatTargetVol = Math.max(0.5, 1 - fdist/20);
+    // friend-theme volume scales with proximity (max at dist 0, silent at dist 20)
+    if (sounds.friendTheme) sounds.friendTheme.volume = Math.max(0, Math.min(1, 1 - fdist / 20));
+    // heartbeat also reacts
+    heartbeatTargetVol  = Math.max(0.5, 1 - fdist / 20);
+    heartbeatTargetRate = 1.0 + Math.max(0, (1 - fdist / 20)) * 0.8;
     if (fdist < 0.8) triggerFriendFlicker();
   }
 
-  // ── Stage 3: exit portal check ──
-  if (gameStage === 3 && exitPortal) {
-    const edx = exitPortal.x - player.x, edy = exitPortal.y - player.y;
-    if (Math.sqrt(edx*edx+edy*edy) < 1.0) triggerEnding();
+  // ── Stage 3: exit portal check (any portal) ──
+  if (gameStage === 3) {
+    for (const ep of exitPortals) {
+      const edx = ep.x - player.x, edy = ep.y - player.y;
+      if (Math.sqrt(edx*edx+edy*edy) < 1.0) { triggerEnding(); break; }
+    }
+    // Update 3 eye entities — they chase but cannot kill (no HP drain in stage 3)
+    for (const e3 of entities3) {
+      if (!e3.active) continue;
+      const d3x = player.x - e3.x, d3y = player.y - e3.y;
+      e3.dist = Math.sqrt(d3x*d3x+d3y*d3y);
+      e3.pathTimer = (e3.pathTimer || 0) - dt;
+      if (e3.pathTimer <= 0 || !e3.path || e3.path.length === 0) {
+        e3.pathTimer = 1.0;
+        const [ex3, ey3] = worldToCell(e3.x, e3.y);
+        const [px3, py3] = worldToCell(player.x, player.y);
+        e3.path = bfsPath(ex3, ey3, px3, py3);
+      }
+      if (e3.path && e3.path.length > 0) {
+        const tgt = e3.path[0];
+        const tdx = tgt[0]-e3.x, tdy = tgt[1]-e3.y;
+        const td = Math.sqrt(tdx*tdx+tdy*tdy);
+        if (td < 0.1) e3.path.shift();
+        else { e3.x += (tdx/td)*ENTITY_SPEED*dt*60; e3.y += (tdy/td)*ENTITY_SPEED*dt*60; }
+      }
+    }
   }
 
-  // ── Friend scare: drain HP ──
-  if (friendScareActive && !dead) {
+  // ── Friend scare: drain HP (only in stage 1/2, not stage 3) ──
+  if (friendScareActive && !dead && gameStage < 3) {
     player.hp = Math.max(0, player.hp - 10 * dt);
     shakeIntensity = Math.max(0, shakeIntensity - dt * 0.5);
   }
 
-  // ── Death check ──
-  if (player.hp <= 0 && !dead) { triggerDeath(); return; }
+  // ── Death check (disabled in stage 3) ──
+  if (player.hp <= 0 && !dead && gameStage < 3) { triggerDeath(); return; }
 
   // ── Ensure nearby chunks are generated ──
   const [ccx, ccy] = getChunkCoords(player.x, player.y);
@@ -2002,7 +2108,7 @@ overlayEl.addEventListener('click', () => {
   heartbeatTargetVol = 0.5;
   heartbeatTargetRate = 1.0;
   wireBoxes = []; wireBoxesDestroyed = 0; puzzleSolved = false;
-  friendEntity = null; exitPortal = null; damageTimer = 0;
+  friendEntity = null; exitPortals = []; entities3 = []; damageTimer = 0; gameStartTime = 0;
   gameStage = savedStage;
   distortionLevel = savedDistortion;
   chunks.clear(); crates = [];
@@ -2015,14 +2121,23 @@ overlayEl.addEventListener('click', () => {
     // Normal start
     entityStartTimer = setTimeout(() => { entity.active = true; }, ENTITY_START_DELAY);
   } else if (savedStage === 2) {
-    // Stage 2: no eye, spawn friend entity far away
-    // Wire boxes auto-generate via generateChunk when gameStage === 2
+    // Stage 2: no eye, friend entity emits sound, wire boxes in maze
     spawnFriendEntity();
     if (sounds.static) { sounds.static.volume = 0; sounds.static.play().catch(()=>{}); }
   } else if (savedStage === 3) {
-    // Stage 3: glitch world, place exit portal
-    exitPortal = { x: 30, y: 30 };
-    generateChunk(Math.floor(30 / (CHUNK_SIZE*CELL)), Math.floor(30 / (CHUNK_SIZE*CELL)));
+    // Stage 3: heavy glitch, 3 eyes chasing, exits scattered, no death
+    player.hp = 100; // invincible effectively — no death check
+    gameStartTime = performance.now();
+    entities3 = [];
+    // Spawn 3 eyes at different positions
+    const eyeSpawns = [[8,8],[15,3],[3,15]];
+    for (const [ex, ey] of eyeSpawns) {
+      generateChunk(Math.floor(ex/(CHUNK_SIZE*CELL)), Math.floor(ey/(CHUNK_SIZE*CELL)));
+      entities3.push({ x: ex, y: ey, active: true, dist: 999, path: [], pathTimer: 0 });
+    }
+    // Exits generate via generateChunk as player explores
+    exitPortals = [];
+    if (sounds.ambient) { sounds.ambient.playbackRate = 0.5; }
   }
   requestAnimationFrame(gameLoop);
 });
