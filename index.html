@@ -809,20 +809,18 @@ function spawnFriendEntity() {
 
 // ─── Friend Sequence (Stage 1 timer) ─────────────────────────────────────────
 function updateFriendSequence(dt) {
-  if (!eyeKilled || gameStage !== 1 || friendSequenceActive || friendScareActive) return;
+  if (!eyeKilled || friendSequenceActive || friendScareActive) return;
   gamePlayTime += dt;
-  // After 3 minutes (180s) start friend theme
+  // After 3 minutes (180s) start friend theme — scare fires 30s later = 3min30s total
   if (!friendThemeStarted && gamePlayTime >= 180) {
     friendThemeStarted = true;
     sounds.friendTheme.currentTime = 0;
     sounds.friendTheme.play().catch(()=>{});
-    // Heartbeat ramps up over 30s
     heartbeatTargetVol = 1.0;
     heartbeatTargetRate = 2.0;
   }
   if (friendThemeStarted && !friendScareActive) {
     friendThemeTimer += dt;
-    // Ramp heartbeat louder over 30s
     const ramp = Math.min(1, friendThemeTimer / 30);
     heartbeatTargetVol  = 1.0;
     heartbeatTargetRate = 1.0 + ramp * 1.5;
@@ -837,42 +835,55 @@ function triggerFriendScare() {
   friendScareActive = true;
   friendSequenceActive = true;
   playerFrozen = true;
-  // Stop friend theme
   sounds.friendTheme.pause();
   sounds.friendTheme.currentTime = 0;
-  // Play friend scare sound
   sounds.friendScare.currentTime = 0;
   sounds.friendScare.play().catch(()=>{});
-  // Play damage sound on jumpscare hit
   if (sounds.damage) { sounds.damage.currentTime = 0; sounds.damage.play().catch(()=>{}); }
-  // Show friend jumpscare for 1 second
-  const fEl = document.getElementById('friendScare');
-  fEl.style.display = 'flex';
-  setTimeout(() => {
-    fEl.style.display = 'none';
-    if (puzzleSolved) {
-      // Puzzle solved: flash to black for 3s then show main menu
-      const blackDiv = document.createElement('div');
-      blackDiv.style.cssText = 'position:fixed;inset:0;background:#000;z-index:550;';
-      document.body.appendChild(blackDiv);
-      setTimeout(() => {
-        document.body.removeChild(blackDiv);
-        showMainMenu(1);
-      }, 3000);
-    } else {
-      // Puzzle not solved: player frozen, HP drains, eye kills them
+
+  const fEl  = document.getElementById('friendScare');
+  const fImg = document.getElementById('friendScareImg');
+
+  if (puzzleSolved) {
+    // Puzzle solved: flicker friend.png ↔ black every 0.05s for 4 seconds, then distorted title
+    fEl.style.display = 'flex';
+    fImg.src = 'friend.png';
+    let tick = 0;
+    const flicker = setInterval(() => {
+      tick++;
+      // Alternate between friend image and black background
+      if (tick % 2 === 0) {
+        fImg.style.opacity = '1';
+        fImg.src = 'friend.png';
+      } else {
+        fImg.style.opacity = '0'; // black (background is already #000)
+      }
+    }, 50);
+    setTimeout(() => {
+      clearInterval(flicker);
+      fEl.style.display = 'none';
+      fImg.style.opacity = '1';
+      fImg.src = 'friend.png';
+      showMainMenu(1);
+    }, 4000);
+  } else {
+    // Puzzle not solved: show friend for 1s, then player frozen on floor, eye kills them
+    fEl.style.display = 'flex';
+    setTimeout(() => {
+      fEl.style.display = 'none';
       shakeIntensity = 8;
       heartbeatTargetVol = 1.0;
       heartbeatTargetRate = 2.0;
       entity = { x: player.x + 15, y: player.y + 15, active: true, dist: 999, hp: 3, dead: false };
       entityPath = [];
-    }
-  }, 1000);
+    }, 1000);
+  }
 }
 
 // ─── Show Main Menu (with distortion) ────────────────────────────────────────
 function showMainMenu(level) {
   distortionLevel = level;
+  gameStage = level + 1; // level 1 distortion → stage 2 (friend hunt), level 2 → stage 3
   gameStarted = false;
   // Stop all game audio
   for (const key of Object.keys(sounds)) {
