@@ -414,6 +414,15 @@ function generateChunk(cx, cy) {
           crates.push({ x: wx + ox, y: wy + oy, open: false });
         }
       }
+      // ── Wire boxes (stage 2 only) — 8% of open cells, 4x smaller than crates ──
+      if (gameStage === 2) {
+        const wroll = hash(cx * 1337 + gx * 3, cy * 7919 + gy * 5);
+        if (wroll < 0.08) {
+          const wox = (hash(gx * 53 + cx, gy * 97 + cy) - 0.5) * 0.5;
+          const woy = (hash(gx * 61 + cx, gy * 83 + cy) - 0.5) * 0.5;
+          wireBoxes.push({ wx: wx + wox, wy: wy + woy, hp: 4, broken: false });
+        }
+      }
     }
   }
 }
@@ -706,9 +715,7 @@ function runCutscene(staticEl, textEl) {
           wireBoxes = []; wireBoxesDestroyed = 0; puzzleSolved = false;
           damageTimer = 0;
           generateChunk(0, 0);
-          gamePlayTime = 0;
-          // Spawn 3 wire boxes at random open cells far from spawn
-          spawnWireBoxes();
+          // Wire boxes will auto-generate as chunks load (gameStage === 2 check in generateChunk)
         }, 800);
       }, 3000);
     }, 2000);
@@ -716,34 +723,7 @@ function runCutscene(staticEl, textEl) {
 }
 
 // ─── Wire Box Spawning ────────────────────────────────────────────────────────
-function spawnWireBoxes() {
-  wireBoxes = [];
-  const candidates = [];
-  for (let cx = -2; cx <= 2; cx++) {
-    for (let cy = -2; cy <= 2; cy++) {
-      generateChunk(cx, cy);
-      const chunkW = CHUNK_SIZE * CELL;
-      const originX = cx * chunkW, originY = cy * chunkW;
-      const grid = chunks.get(chunkKey(cx, cy));
-      for (let gy = 1; gy < CHUNK_SIZE * 2; gy += 2) {
-        for (let gx = 1; gx < CHUNK_SIZE * 2; gx += 2) {
-          if (grid[gy][gx] === 1) continue;
-          const wx = originX + gx + 0.5;
-          const wy = originY + gy + 0.5;
-          const dist = Math.sqrt((wx-1.5)*(wx-1.5)+(wy-1.5)*(wy-1.5));
-          if (dist > 8) candidates.push({ wx, wy });
-        }
-      }
-    }
-  }
-  for (let i = candidates.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
-  }
-  for (let i = 0; i < Math.min(3, candidates.length); i++) {
-    wireBoxes.push({ wx: candidates[i].wx, wy: candidates[i].wy, hp: 4, broken: false });
-  }
-}
+// Wire boxes are now generated inside generateChunk when gameStage === 2
 
 function spawnFriendEntity() {
   const candidates = [];
@@ -1183,8 +1163,12 @@ function renderSprites() {
       if (anyVis) drawCrateSprite(bctx, drawX, drawY, spriteW, spriteH, sp.type === 'crateOpen');
       bctx.restore();
     } else if (sp.type === 'wireBox') {
-      const startCol = Math.max(0, drawX | 0);
-      const endCol   = Math.min(RENDER_W - 1, (drawX + spriteW) | 0);
+      const wSpriteH = Math.min(RENDER_H * 2, (RENDER_H / dist * 0.4) | 0); // 4x smaller
+      const wSpriteW = (wSpriteH * 0.8) | 0;
+      const wDrawX = screenX - wSpriteW / 2;
+      const wDrawY = (RENDER_H - wSpriteH) / 2 + wSpriteH * 0.3; // sit lower on wall
+      const startCol = Math.max(0, wDrawX | 0);
+      const endCol   = Math.min(RENDER_W - 1, (wDrawX + wSpriteW) | 0);
       bctx.save();
       bctx.globalAlpha = Math.max(0.05, fog * fog * lightLevel);
       bctx.beginPath();
@@ -1196,7 +1180,7 @@ function renderSprites() {
       for (let c = startCol; c <= endCol; c++) {
         if (zBuffer[c] > dist) { anyVisW = true; break; }
       }
-      if (anyVisW) drawWireBoxSprite(bctx, drawX, drawY, spriteW, spriteH, sp.data.hp);
+      if (anyVisW) drawWireBoxSprite(bctx, wDrawX, wDrawY, wSpriteW, wSpriteH, sp.data.hp);
       bctx.restore();
     } else if (sp.type === 'friend' && friendImg && friendImg.complete) {
       bctx.save();
@@ -1957,8 +1941,8 @@ overlayEl.addEventListener('click', () => {
     // Normal start
     entityStartTimer = setTimeout(() => { entity.active = true; }, ENTITY_START_DELAY);
   } else if (savedStage === 2) {
-    // Stage 2: no eye, spawn friend entity far away, spawn wire boxes
-    spawnWireBoxes();
+    // Stage 2: no eye, spawn friend entity far away
+    // Wire boxes auto-generate via generateChunk when gameStage === 2
     spawnFriendEntity();
     if (sounds.static) { sounds.static.volume = 0; sounds.static.play().catch(()=>{}); }
   } else if (savedStage === 3) {
