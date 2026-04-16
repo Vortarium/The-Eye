@@ -345,8 +345,8 @@ function generateChunk(cx, cy) {
       if (isSpawnChunk && Math.abs(wx - 1.5) < 4 && Math.abs(wy - 1.5) < 4) continue;
       // deterministic roll per cell using hash
       const roll = hash(cx * 1000 + gx, cy * 1000 + gy);
-      if (roll < 0.55) { // ~55% of open cells get 1-3 crates
-        const count = 1 + (hash(gx * 7 + cx, gy * 13 + cy) < 0.5 ? 0 : hash(gx + 3, gy + 7) < 0.5 ? 1 : 2);
+      if (roll < 0.20) { // ~20% of open cells get 1-2 crates
+        const count = 1 + (hash(gx * 7 + cx, gy * 13 + cy) < 0.35 ? 1 : 0);
         for (let k = 0; k < count; k++) {
           const ox = (hash(gx + k * 17, gy + k * 31) - 0.5) * 0.7;
           const oy = (hash(gx + k * 23, gy + k * 41) - 0.5) * 0.7;
@@ -408,7 +408,7 @@ let crates = [];
 // ─── Lighting ─────────────────────────────────────────────────────────────────
 // Each maze cell has a light: 90% dead, 10% flickering
 // lightLevel is a 0-1 multiplier applied to all rendering brightness
-let lightLevel = 0.18; // base ambient (nearly dark)
+let lightLevel = 0.45; // base ambient — dim but visible
 let lightFlicker = 0;  // current flicker contribution
 let flickerTimer = 0;
 let flickerTarget = 0;
@@ -445,7 +445,7 @@ function updateLighting(dt, ts) {
   }
   // Smooth toward target
   lightFlicker += (flickerTarget - lightFlicker) * Math.min(1, dt * 18);
-  lightLevel = 0.18 + lightFlicker;
+  lightLevel = 0.45 + lightFlicker;
 }
 
 // ─── Input ────────────────────────────────────────────────────────────────────
@@ -512,8 +512,8 @@ function handleAttack() {
     }
   }
 
-  // Attack entity if in range and weapon equipped
-  if (!entity.dead && entity.active && entity.dist < 2.0 && weaponSlot && weaponSlot.type === 'knife') {
+  // Attack entity if in range and knife is the active hand item
+  if (!entity.dead && entity.active && entity.dist < 2.0 && getMainHand() && getMainHand().type === 'knife') {
     weaponSlot.durability--;
     entity.hp--;
     if (entity.hp <= 0) killEntity();
@@ -521,17 +521,16 @@ function handleAttack() {
     return;
   }
 
-  // Use food if food is in the "active" (main display) slot
-  const activeIsFood = slotsSwapped ? (weaponSlot === null && foodSlot !== null) || true : false;
-  if (slotsSwapped && foodSlot) {
+  // Use food if food is the active hand item
+  if (getMainHand() && getMainHand().type === 'food') {
     player.hp = Math.min(player.maxHp, player.hp + 10);
     foodSlot.count--;
     if (foodSlot.count <= 0) foodSlot = null;
     return;
   }
 
-  // Knife attack (no entity nearby — just swing)
-  if (!slotsSwapped && weaponSlot && weaponSlot.type === 'knife') {
+  // Knife swing (no entity nearby)
+  if (getMainHand() && getMainHand().type === 'knife') {
     weaponSlot.durability--;
     if (weaponSlot.durability <= 0) weaponSlot = null;
   }
@@ -540,15 +539,20 @@ function handleAttack() {
 function killEntity() {
   entity.dead = true;
   entity.active = false;
-  // Spawn blood splats around entity position
-  for (let i = 0; i < 18; i++) {
+  // Spawn pixelated blood splats around entity position
+  const shades = ['#6b0000','#8b0000','#a00000','#7a0000','#500000','#c00000'];
+  for (let i = 0; i < 22; i++) {
     const angle = Math.random() * Math.PI * 2;
-    const r = 0.3 + Math.random() * 2.5;
+    const r = 0.2 + Math.random() * 2.8;
+    // Pre-bake a small palette of pixel shades for this splat
+    const shade = [];
+    for (let s = 0; s < 16; s++) shade.push(shades[Math.floor(Math.random() * shades.length)]);
     bloodSplats.push({
       x: entity.x + Math.cos(angle) * r,
       y: entity.y + Math.sin(angle) * r,
-      radius: 0.15 + Math.random() * 0.5,
-      alpha: 0.6 + Math.random() * 0.4
+      radius: 0.2 + Math.random() * 0.6,
+      alpha: 0.7 + Math.random() * 0.3,
+      shade
     });
   }
   // Respawn entity after 30s
@@ -604,7 +608,7 @@ function renderScene() {
       const wallH = Math.min(RENDER_H, (RENDER_H / corrDist) | 0);
       const wallTop = ((RENDER_H - wallH) / 2) | 0;
       const fog = Math.max(0, 1 - corrDist / MAX_DEPTH);
-      const fogSq = fog * fog * lightLevel;
+      const fogSq = (0.3 + fog * 0.7) * lightLevel;
 
       const texX = (wallX * TEX_SIZE) & (TEX_SIZE - 1);
 
@@ -626,8 +630,8 @@ function renderScene() {
     const rowDist = (RENDER_H / 2) / Math.abs(row - RENDER_H / 2 + 0.001);
     const floorFog = Math.max(0, 1 - rowDist / MAX_DEPTH);
     // ceiling is darker than floor, both modulated by lightLevel
-    const brightMul = isCeil ? floorFog * floorFog * lightLevel * 0.55
-                              : floorFog * floorFog * lightLevel * 0.75;
+    const brightMul = isCeil ? (0.2 + floorFog * 0.8) * lightLevel * 0.65
+                              : (0.2 + floorFog * 0.8) * lightLevel * 0.85;
 
     const rowStep_x = Math.cos(player.angle - HALF_FOV) * rowDist;
     const rowStep_y = Math.sin(player.angle - HALF_FOV) * rowDist;
@@ -709,25 +713,38 @@ function renderSprites() {
     const drawY = (RENDER_H - spriteH) / 2;
 
     if (sp.type === 'blood') {
-      // Project as a floor decal — draw as a small red ellipse at the bottom of the sprite column
-      const startCol = Math.max(0, drawX | 0);
-      const endCol   = Math.min(RENDER_W - 1, (drawX + spriteW) | 0);
-      let anyVis = false;
-      for (let c = startCol; c <= endCol; c++) { if (zBuffer[c] >= dist) { anyVis = true; break; } }
-      if (!anyVis) continue;
+      // Pixelated floor decal — project to screen bottom, occlude by walls
+      // Blood sits on the floor so it appears at the lower half of the view
+      const floorScreenY = (RENDER_H / 2) + (RENDER_H / 2) / dist * 0.5 | 0;
+      const bw = Math.max(2, (RENDER_W / dist * sp.data.radius * 1.5) | 0);
+      const bh = Math.max(1, (bw * 0.35) | 0);
+      const bx = screenX - (bw / 2) | 0;
+      const by = Math.min(RENDER_H - bh - 1, floorScreenY) | 0;
+
+      // Wall occlusion — skip if any wall is closer
+      const sc = Math.max(0, bx), ec = Math.min(RENDER_W - 1, bx + bw);
+      let blocked = true;
+      for (let c = sc; c <= ec; c++) {
+        if (zBuffer[c] > dist) { blocked = false; break; }
+      }
+      if (blocked) continue;
+
+      // Draw as chunky pixel blocks (pixelated look)
+      const pixSize = Math.max(1, (bw / 5) | 0);
       bctx.save();
-      bctx.globalAlpha = sp.data.alpha * fog;
-      bctx.fillStyle = '#8b0000';
-      const bw = Math.max(2, spriteW * sp.data.radius);
-      const bh = Math.max(1, bw * 0.4);
-      bctx.beginPath();
-      bctx.ellipse(screenX, RENDER_H * 0.72, bw, bh, 0, 0, Math.PI * 2);
-      bctx.fill();
+      bctx.globalAlpha = sp.data.alpha * Math.min(1, fog * 1.5);
+      for (let px = bx; px < bx + bw; px += pixSize) {
+        for (let py = by; py < by + bh; py += pixSize) {
+          // Vary shade slightly per pixel using stored seed
+          const shade = sp.data.shade[(((px - bx) / pixSize | 0) + (py - by) / pixSize * 8 | 0) % sp.data.shade.length];
+          bctx.fillStyle = shade;
+          bctx.fillRect(px, py, pixSize, pixSize);
+        }
+      }
       bctx.restore();
     } else if (sp.type === 'entity' && eyeImg && eyeImg.complete) {
       bctx.save();
       bctx.globalAlpha = fog * fog;
-      // Occlusion check via zBuffer
       const startCol = Math.max(0, drawX | 0);
       const endCol = Math.min(RENDER_W - 1, (drawX + spriteW) | 0);
       let visible = false;
@@ -739,25 +756,22 @@ function renderSprites() {
       }
       bctx.restore();
     } else if (sp.type === 'crate' || sp.type === 'crateOpen') {
-      // Proper occlusion: only draw columns not blocked by a wall
       const startCol = Math.max(0, drawX | 0);
       const endCol   = Math.min(RENDER_W - 1, (drawX + spriteW) | 0);
-      let anyVisible = false;
-      for (let c = startCol; c <= endCol; c++) {
-        if (zBuffer[c] >= dist) { anyVisible = true; break; }
-      }
-      if (!anyVisible) continue;
+      // Clip to columns where no wall is closer
       bctx.save();
       bctx.globalAlpha = Math.max(0.1, fog * fog);
-      // Clip to only visible columns
       bctx.beginPath();
       for (let c = startCol; c <= endCol; c++) {
-        if (zBuffer[c] >= dist) {
-          bctx.rect(c, 0, 1, RENDER_H);
-        }
+        if (zBuffer[c] > dist) bctx.rect(c, 0, 1, RENDER_H);
       }
       bctx.clip();
-      drawCrateSprite(bctx, drawX, drawY, spriteW, spriteH, sp.type === 'crateOpen');
+      // Check if anything was actually visible
+      let anyVis = false;
+      for (let c = startCol; c <= endCol; c++) {
+        if (zBuffer[c] > dist) { anyVis = true; break; }
+      }
+      if (anyVis) drawCrateSprite(bctx, drawX, drawY, spriteW, spriteH, sp.type === 'crateOpen');
       bctx.restore();
     }
   }
@@ -893,8 +907,9 @@ function drawHand() {
   bctx.fillStyle = '#c68642';
   bctx.fillRect(hxP + 8, hy + 14, 6, 10);
 
-  // If knife equipped in weapon slot (regardless of swap, knife is always drawn when held)
-  if (weaponSlot && weaponSlot.type === 'knife') {
+  // Draw held item based on active hand
+  const heldItem = getMainHand();
+  if (heldItem && heldItem.type === 'knife') {
     bctx.fillStyle = '#ccc';
     bctx.fillRect(hxP - 8, hy + 5, 6, 20);
     bctx.fillStyle = '#888';
