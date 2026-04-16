@@ -4,39 +4,50 @@
 <meta charset="UTF-8">
 <title>THE EYE</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#000; overflow:hidden; width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; font-family:'Share Tech Mono', monospace; }
+  body { background:#000; overflow:hidden; width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; }
   #gameCanvas { image-rendering: pixelated; image-rendering: crisp-edges; display:block; }
   #overlay {
     position:fixed; inset:0; background:#000; display:flex; flex-direction:column;
     align-items:center; justify-content:center; z-index:100; cursor:pointer;
   }
-  #overlay h1 { color:#8b0000; font-size:4rem; letter-spacing:0.3em; text-shadow:0 0 30px #ff0000; margin-bottom:1rem; }
-  #overlay p { color:#555; font-size:1rem; letter-spacing:0.2em; animation: blink 1.5s infinite; }
-  #overlay .sub { color:#333; font-size:0.7rem; margin-top:2rem; letter-spacing:0.1em; }
-  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
   #died {
     position:fixed; inset:0; background:#000; display:none; flex-direction:column;
     align-items:center; justify-content:center; z-index:200;
   }
-  #died h1 { color:#8b0000; font-size:5rem; letter-spacing:0.4em; text-shadow:0 0 40px #ff0000; }
   #jumpscare {
     position:fixed; inset:0; display:none; z-index:300; background:#000;
     align-items:center; justify-content:center;
   }
-  #jumpscare img { width:100%; height:100%; object-fit:cover; }
+  #jumpscare img { width:100%; height:100%; object-fit:cover; image-rendering:pixelated; }
+  /* Static/cutscene overlay */
+  #staticOverlay {
+    position:fixed; inset:0; display:none; z-index:400;
+    align-items:center; justify-content:center; flex-direction:column;
+  }
+  #staticOverlay img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; image-rendering:pixelated; }
+  #cutsceneText {
+    position:absolute; z-index:10; color:#ff0000;
+    font-family:monospace; font-size:1.2rem; letter-spacing:0.15em;
+    text-align:center; padding:1rem; image-rendering:pixelated;
+    text-shadow: 2px 2px #000, -2px -2px #000;
+    display:none;
+  }
+  /* Friend jumpscare overlay */
+  #friendScare {
+    position:fixed; inset:0; display:none; z-index:500; background:#000;
+    align-items:center; justify-content:center;
+  }
+  #friendScare img { width:100%; height:100%; object-fit:cover; image-rendering:pixelated; }
 </style>
 </head>
 <body>
 <canvas id="gameCanvas"></canvas>
-<div id="overlay">
-  <h1>THE EYE</h1>
-  <p>CLICK TO ENTER</p>
-  <div class="sub">arrows: move/turn &nbsp;|&nbsp; space/click: attack &nbsp;|&nbsp; down: swap items</div>
-</div>
-<div id="died"><h1>YOU DIED</h1></div>
+<div id="overlay"><canvas id="titleCanvas"></canvas></div>
+<div id="died"><canvas id="diedCanvas" width="320" height="200" style="image-rendering:pixelated;width:640px;height:400px;"></canvas></div>
 <div id="jumpscare"><img src="eye.png" alt=""></div>
+<div id="staticOverlay"><img id="staticImg" src="static.gif" alt=""><div id="cutsceneText"></div></div>
+<div id="friendScare"><img src="friend.png" alt=""></div>
 
 <script>
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -89,14 +100,21 @@ function initAudio() {
   loadAudio('punch', 'punch.mp3');
   loadAudio('jumpscare', 'jumpscare.mp3');
   loadAudio('music', 'music.mp3');
+  loadAudio('static', 'static.mp3');
+  loadAudio('friendTheme', 'friend-theme.mp3');
+  loadAudio('friendScare', 'friend-scare.mp3');
 
   sounds.ambient.loop = true;
   sounds.ambient.volume = 0;
   sounds.heartbeat.loop = true;
   sounds.heartbeat.volume = 0;
+  sounds.static.loop = true;
+  sounds.static.volume = 0;
+  sounds.friendTheme.loop = false;
 
   sounds.ambient.play().catch(()=>{});
   sounds.heartbeat.play().catch(()=>{});
+  sounds.static.play().catch(()=>{});
 
   // Fade in over 5 seconds
   let t = 0;
@@ -109,7 +127,7 @@ function initAudio() {
 
   // Music: 1% chance every second
   setInterval(() => {
-    if (!musicPlaying && Math.random() < 0.01) {
+    if (!musicPlaying && !staticSequenceActive && !friendSequenceActive && Math.random() < 0.01) {
       musicPlaying = true;
       sounds.music.currentTime = 0;
       sounds.music.play().catch(()=>{});
@@ -121,6 +139,20 @@ function initAudio() {
 let musicPlaying = false;
 let walkTimer = 0;
 let heartbeatRecovery = null;
+
+// ─── Static / Kill-Eye Cutscene ───────────────────────────────────────────────
+let staticSequenceActive = false;
+let staticAlpha = 0; // 0=none, 1=full
+
+// ─── Friend Sequence ──────────────────────────────────────────────────────────
+let friendSequenceActive = false;
+let friendThemeTimer = 0;      // counts up after eye killed
+let friendThemeStarted = false;
+let friendScareActive = false;
+let playerFrozen = false;
+let shakeIntensity = 0;
+let eyeKilled = false;         // set true after kill-eye cutscene completes
+let gamePlayTime = 0;          // total play time in seconds
 
 function playWalk() {
   const now = performance.now();
@@ -544,7 +576,6 @@ function killEntity() {
   for (let i = 0; i < 22; i++) {
     const angle = Math.random() * Math.PI * 2;
     const r = 0.2 + Math.random() * 2.8;
-    // Pre-bake a small palette of pixel shades for this splat
     const shade = [];
     for (let s = 0; s < 16; s++) shade.push(shades[Math.floor(Math.random() * shades.length)]);
     bloodSplats.push({
@@ -555,11 +586,132 @@ function killEntity() {
       shade
     });
   }
-  // Respawn entity after 30s
+  // Begin static sequence
+  startStaticSequence();
+}
+
+function startStaticSequence() {
+  staticSequenceActive = true;
+  playerFrozen = true;
+  const staticEl = document.getElementById('staticOverlay');
+  const textEl   = document.getElementById('cutsceneText');
+  staticEl.style.display = 'flex';
+  staticEl.style.opacity = '0';
+
+  // Fade static in over 15 seconds, fade everything else out
+  let elapsed = 0;
+  const FADE_DUR = 15000;
+  const fadeInterval = setInterval(() => {
+    elapsed += 100;
+    const t = Math.min(1, elapsed / FADE_DUR);
+    staticAlpha = t;
+    staticEl.style.opacity = t.toFixed(3);
+    // Fade normal audio out, static in
+    if (sounds.ambient)   sounds.ambient.volume   = Math.max(0, 0.6 * (1 - t));
+    if (sounds.heartbeat) sounds.heartbeat.volume = Math.max(0, 0.5 * (1 - t));
+    if (sounds.static)    sounds.static.volume    = Math.min(1, t);
+    if (t >= 1) {
+      clearInterval(fadeInterval);
+      runCutscene(staticEl, textEl);
+    }
+  }, 100);
+}
+
+function runCutscene(staticEl, textEl) {
+  // Show first message for 3s
+  textEl.style.display = 'block';
+  textEl.textContent = 'YOU FREED THE WRONG SOUL';
   setTimeout(() => {
-    entity = { x: player.x + 10, y: player.y + 10, active: true, dist: 999, hp: 3, dead: false };
+    textEl.style.display = 'none';
+    // 2s gap then second message
+    setTimeout(() => {
+      textEl.style.display = 'block';
+      textEl.textContent = 'WE WILL FIND AND TAKE YOU DOWN FOR SINNING';
+      setTimeout(() => {
+        textEl.style.display = 'none';
+        // Flash to black then fade back
+        staticEl.style.transition = 'opacity 0.1s';
+        staticEl.style.opacity = '0';
+        setTimeout(() => {
+          staticEl.style.display = 'none';
+          staticEl.style.transition = '';
+          staticAlpha = 0;
+          // Stop static, restore audio
+          if (sounds.static) { sounds.static.pause(); sounds.static.currentTime = 0; sounds.static.volume = 0; }
+          if (sounds.ambient)   sounds.ambient.volume   = 0.6;
+          if (sounds.heartbeat) sounds.heartbeat.volume = 0.5;
+          // Reset game but keep eyeKilled = true (no more eyes)
+          eyeKilled = true;
+          staticSequenceActive = false;
+          playerFrozen = false;
+          friendThemeTimer = 0;
+          friendThemeStarted = false;
+          // Full reset except eyeKilled flag
+          player = { x: 1.5, y: 1.5, angle: 0, hp: 100, maxHp: 100 };
+          weaponSlot = null; foodSlot = null; slotsSwapped = false;
+          entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
+          entityPath = [];
+          bloodSplats = [];
+          chunks.clear(); crates = [];
+          generateChunk(0, 0);
+          gamePlayTime = 0;
+        }, 800);
+      }, 3000);
+    }, 2000);
+  }, 3000);
+}
+
+// ─── Friend Sequence ──────────────────────────────────────────────────────────
+function updateFriendSequence(dt) {
+  if (!eyeKilled || friendSequenceActive || friendScareActive) return;
+  gamePlayTime += dt;
+  // After 3 minutes (180s) start friend theme
+  if (!friendThemeStarted && gamePlayTime >= 180) {
+    friendThemeStarted = true;
+    sounds.friendTheme.currentTime = 0;
+    sounds.friendTheme.play().catch(()=>{});
+    // Heartbeat ramps up over 30s
+    heartbeatTargetVol = 1.0;
+    heartbeatTargetRate = 2.0;
+  }
+  if (friendThemeStarted && !friendScareActive) {
+    friendThemeTimer += dt;
+    // Ramp heartbeat louder over 30s
+    const ramp = Math.min(1, friendThemeTimer / 30);
+    heartbeatTargetVol  = 1.0;
+    heartbeatTargetRate = 1.0 + ramp * 1.5;
+    if (sounds.heartbeat) sounds.heartbeat.volume = Math.min(1, 0.5 + ramp * 0.5);
+    if (friendThemeTimer >= 30) {
+      triggerFriendScare();
+    }
+  }
+}
+
+function triggerFriendScare() {
+  friendScareActive = true;
+  friendSequenceActive = true;
+  playerFrozen = true;
+  // Stop friend theme
+  sounds.friendTheme.pause();
+  sounds.friendTheme.currentTime = 0;
+  // Play friend scare sound
+  sounds.friendScare.currentTime = 0;
+  sounds.friendScare.play().catch(()=>{});
+  // Show friend jumpscare for 1 second
+  const fEl = document.getElementById('friendScare');
+  fEl.style.display = 'flex';
+  setTimeout(() => {
+    fEl.style.display = 'none';
+    // Player falls — screen shakes, blood fills sides, hp drains
+    shakeIntensity = 8;
+    heartbeatTargetVol = 1.0;
+    heartbeatTargetRate = 2.0;
+    // Spawn eye approaching from distance
+    entity = { x: player.x + 15, y: player.y + 15, active: true, dist: 999, hp: 3, dead: false };
     entityPath = [];
-  }, 30000);
+    // Wait for eye to reach player (handled in updateEntity — when dist < 0.5 it kills)
+    // Override: once eye reaches, force death
+  }, 1000);
 }
 
 // ─── Raycasting ───────────────────────────────────────────────────────────────
@@ -732,7 +884,7 @@ function renderSprites() {
       // Draw as chunky pixel blocks (pixelated look)
       const pixSize = Math.max(1, (bw / 5) | 0);
       bctx.save();
-      bctx.globalAlpha = sp.data.alpha * Math.min(1, fog * 1.5);
+      bctx.globalAlpha = sp.data.alpha * Math.min(1, fog * 1.5) * lightLevel;
       for (let px = bx; px < bx + bw; px += pixSize) {
         for (let py = by; py < by + bh; py += pixSize) {
           // Vary shade slightly per pixel using stored seed
@@ -760,7 +912,7 @@ function renderSprites() {
       const endCol   = Math.min(RENDER_W - 1, (drawX + spriteW) | 0);
       // Clip to columns where no wall is closer
       bctx.save();
-      bctx.globalAlpha = Math.max(0.1, fog * fog);
+      bctx.globalAlpha = Math.max(0.05, fog * fog * lightLevel);
       bctx.beginPath();
       for (let c = startCol; c <= endCol; c++) {
         if (zBuffer[c] > dist) bctx.rect(c, 0, 1, RENDER_H);
@@ -1018,6 +1170,11 @@ function updateEntity(dt) {
 
   // Jumpscare
   if (entity.dist < 0.5 && !jumpscareActive) {
+    if (friendScareActive) {
+      // Eye reached player during friend sequence — force death
+      triggerDeath();
+      return;
+    }
     triggerJumpscare();
     return;
   }
@@ -1086,7 +1243,10 @@ let dead = false;
 function triggerDeath() {
   if (dead) return;
   dead = true;
-  diedEl.style.display = 'flex';
+  playerFrozen = true;
+  const dEl = document.getElementById('died');
+  dEl.style.display = 'flex';
+  drawDiedScreen();
   setTimeout(() => {
     resetGame();
   }, 3000);
@@ -1100,6 +1260,24 @@ function resetGame() {
   bloodSplats = [];
   dead = false;
   jumpscareActive = false;
+  playerFrozen = false;
+  friendScareActive = false;
+  friendSequenceActive = false;
+  friendThemeStarted = false;
+  friendThemeTimer = 0;
+  shakeIntensity = 0;
+  eyeKilled = false;
+  gamePlayTime = 0;
+  staticSequenceActive = false;
+  staticAlpha = 0;
+  heartbeatTargetVol = 0.5;
+  heartbeatTargetRate = 1.0;
+  if (sounds.static)      { sounds.static.pause(); sounds.static.currentTime = 0; sounds.static.volume = 0; }
+  if (sounds.friendTheme) { sounds.friendTheme.pause(); sounds.friendTheme.currentTime = 0; }
+  if (sounds.ambient)     sounds.ambient.volume = 0.6;
+  if (sounds.heartbeat)   sounds.heartbeat.volume = 0.5;
+  document.getElementById('staticOverlay').style.display = 'none';
+  document.getElementById('friendScare').style.display = 'none';
   diedEl.style.display = 'none';
   jumpscareEl.style.display = 'none';
   chunks.clear();
@@ -1121,51 +1299,57 @@ function gameLoop(ts) {
   const dt = Math.min((ts - lastTime) / 1000, 0.1);
   lastTime = ts;
 
-  if (dead || jumpscareActive) return;
+  if (dead) return;
+  if (staticSequenceActive) return; // frozen during cutscene
 
-  // ── Input ──
+  // ── Input (blocked when frozen) ──
   let moved = false;
 
-  if (keys['ArrowLeft']) {
-    player.angle -= TURN_STEP * dt * 3;
-  }
-  if (keys['ArrowRight']) {
-    player.angle += TURN_STEP * dt * 3;
-  }
+  if (!playerFrozen) {
+    if (keys['ArrowLeft'])  player.angle -= TURN_STEP * dt * 3;
+    if (keys['ArrowRight']) player.angle += TURN_STEP * dt * 3;
 
-  if (keys['ArrowUp']) {
-    const nx = player.x + Math.cos(player.angle) * PLAYER_SPEED * dt * 60;
-    const ny = player.y + Math.sin(player.angle) * PLAYER_SPEED * dt * 60;
-    if (!isWall(nx + Math.cos(player.angle)*0.2, player.y)) player.x = nx;
-    if (!isWall(player.x, ny + Math.sin(player.angle)*0.2)) player.y = ny;
-    moved = true;
-    playWalk();
+    if (keys['ArrowUp']) {
+      const nx = player.x + Math.cos(player.angle) * PLAYER_SPEED * dt * 60;
+      const ny = player.y + Math.sin(player.angle) * PLAYER_SPEED * dt * 60;
+      if (!isWall(nx + Math.cos(player.angle)*0.2, player.y)) player.x = nx;
+      if (!isWall(player.x, ny + Math.sin(player.angle)*0.2)) player.y = ny;
+      moved = true;
+      playWalk();
+    }
   }
-  // ArrowDown is swap-only (handled in keydown listener)
 
   // ── Hand animation ──
-  if (moved) {
-    handSway += 0.15;
-  }
-  if (punchAnim > 0) {
-    punchAnim -= dt * 4;
-    if (punchAnim < 0) punchAnim = 0;
-  }
+  if (moved) handSway += 0.15;
+  if (punchAnim > 0) { punchAnim -= dt * 4; if (punchAnim < 0) punchAnim = 0; }
 
   // ── Entity ──
   updateEntity(dt);
   applyHeartbeat(dt);
   updateLighting(dt, ts);
+  updateFriendSequence(dt);
+
+  // ── Friend scare: drain HP ──
+  if (friendScareActive && !dead) {
+    player.hp = Math.max(0, player.hp - 10 * dt);
+    shakeIntensity = Math.max(0, shakeIntensity - dt * 0.5);
+  }
 
   // ── Death check ──
-  if (player.hp <= 0) { triggerDeath(); return; }
+  if (player.hp <= 0 && !dead) { triggerDeath(); return; }
 
   // ── Ensure nearby chunks are generated ──
   const [ccx, ccy] = getChunkCoords(player.x, player.y);
-  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) generateChunk(ccx+dx, ccy+dy);
+  for (let ddx = -1; ddx <= 1; ddx++) for (let ddy = -1; ddy <= 1; ddy++) generateChunk(ccx+ddx, ccy+ddy);
 
   // ── Render ──
   bctx.clearRect(0, 0, RENDER_W, RENDER_H);
+
+  // Screen shake offset
+  const sx = friendScareActive ? (Math.random() - 0.5) * shakeIntensity * 2 : 0;
+  const sy = friendScareActive ? (Math.random() - 0.5) * shakeIntensity * 2 : 0;
+  if (sx || sy) { bctx.save(); bctx.translate(sx, sy); }
+
   renderScene();
   renderSprites();
   drawVignette();
@@ -1175,15 +1359,156 @@ function gameLoop(ts) {
   drawHand();
   drawHUD();
 
+  if (sx || sy) bctx.restore();
+
   // Draw to main canvas
   ctx.clearRect(0, 0, RENDER_W, RENDER_H);
   ctx.drawImage(buf, 0, 0);
 }
 
+// ─── Title Screen ─────────────────────────────────────────────────────────────
+function drawTitleScreen() {
+  const tc = document.getElementById('titleCanvas');
+  const scale = Math.min(window.innerWidth / 320, window.innerHeight / 200);
+  tc.width = 320; tc.height = 200;
+  tc.style.width  = (320 * scale) + 'px';
+  tc.style.height = (200 * scale) + 'px';
+  tc.style.imageRendering = 'pixelated';
+  tc.style.cursor = 'pointer';
+  const tx = tc.getContext('2d');
+
+  // Background — dark noise
+  for (let y = 0; y < 200; y++) {
+    for (let x = 0; x < 320; x++) {
+      const v = Math.floor(Math.random() * 18);
+      tx.fillStyle = `rgb(${v},${v},${v})`;
+      tx.fillRect(x, y, 1, 1);
+    }
+  }
+
+  // "VORTARIUM PRODUCTIONS" — white/gray gradient, pixelated block letters
+  function pixelText(text, startX, startY, charW, charH, gap, colors) {
+    // Simple 3x5 pixel font map
+    const font = {
+      'A':[[0,1,0],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],
+      'B':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,1,0]],
+      'C':[[0,1,1],[1,0,0],[1,0,0],[1,0,0],[0,1,1]],
+      'D':[[1,1,0],[1,0,1],[1,0,1],[1,0,1],[1,1,0]],
+      'E':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,1,1]],
+      'F':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,0,0]],
+      'G':[[0,1,1],[1,0,0],[1,0,1],[1,0,1],[0,1,1]],
+      'H':[[1,0,1],[1,0,1],[1,1,1],[1,0,1],[1,0,1]],
+      'I':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[1,1,1]],
+      'J':[[0,0,1],[0,0,1],[0,0,1],[1,0,1],[0,1,0]],
+      'K':[[1,0,1],[1,1,0],[1,0,0],[1,1,0],[1,0,1]],
+      'L':[[1,0,0],[1,0,0],[1,0,0],[1,0,0],[1,1,1]],
+      'M':[[1,0,1],[1,1,1],[1,0,1],[1,0,1],[1,0,1]],
+      'N':[[1,0,1],[1,1,1],[1,1,1],[1,0,1],[1,0,1]],
+      'O':[[0,1,0],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],
+      'P':[[1,1,0],[1,0,1],[1,1,0],[1,0,0],[1,0,0]],
+      'Q':[[0,1,0],[1,0,1],[1,0,1],[1,1,1],[0,1,1]],
+      'R':[[1,1,0],[1,0,1],[1,1,0],[1,0,1],[1,0,1]],
+      'S':[[0,1,1],[1,0,0],[0,1,0],[0,0,1],[1,1,0]],
+      'T':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[0,1,0]],
+      'U':[[1,0,1],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],
+      'V':[[1,0,1],[1,0,1],[1,0,1],[0,1,0],[0,1,0]],
+      'W':[[1,0,1],[1,0,1],[1,0,1],[1,1,1],[1,0,1]],
+      'X':[[1,0,1],[1,0,1],[0,1,0],[1,0,1],[1,0,1]],
+      'Y':[[1,0,1],[1,0,1],[0,1,0],[0,1,0],[0,1,0]],
+      'Z':[[1,1,1],[0,0,1],[0,1,0],[1,0,0],[1,1,1]],
+      ' ':[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]],
+    };
+    let cx = startX;
+    for (let ci = 0; ci < text.length; ci++) {
+      const ch = text[ci].toUpperCase();
+      const map = font[ch] || font[' '];
+      const col = colors[Math.floor(ci / text.length * colors.length)];
+      for (let row = 0; row < 5; row++) {
+        for (let col2 = 0; col2 < 3; col2++) {
+          if (map[row][col2]) {
+            tx.fillStyle = col;
+            tx.fillRect(cx + col2 * charW, startY + row * charH, charW, charH);
+          }
+        }
+      }
+      cx += 3 * charW + gap;
+    }
+  }
+
+  // Gradient colors white→gray
+  const gradColors = [];
+  const txt = 'VORTARIUM PRODUCTIONS';
+  for (let i = 0; i < txt.length; i++) {
+    const v = Math.floor(255 - (i / txt.length) * 120);
+    gradColors.push(`rgb(${v},${v},${v})`);
+  }
+  pixelText('VORTARIUM', 18, 30, 3, 3, 2, gradColors);
+  pixelText('PRODUCTIONS', 10, 60, 3, 3, 2, gradColors.slice(9));
+
+  // "THE EYE" title — big red
+  const titleColors = [];
+  for (let i = 0; i < 7; i++) {
+    const r = 180 + Math.floor(i / 7 * 75);
+    titleColors.push(`rgb(${r},0,0)`);
+  }
+  pixelText('THE EYE', 60, 100, 5, 5, 3, titleColors);
+
+  // "CLICK TO ENTER" blinking — draw static (blink handled by redraw)
+  const blink = Math.floor(Date.now() / 600) % 2 === 0;
+  if (blink) pixelText('CLICK TO ENTER', 28, 160, 2, 2, 1, ['#555','#666','#555','#666','#555','#666','#555','#666','#555','#666','#555','#666','#555','#666']);
+
+  // Scanlines
+  for (let y = 0; y < 200; y += 2) {
+    tx.fillStyle = 'rgba(0,0,0,0.2)';
+    tx.fillRect(0, y, 320, 1);
+  }
+}
+
+function drawDiedScreen() {
+  const dc = document.getElementById('diedCanvas');
+  const dx = dc.getContext('2d');
+  dx.fillStyle = '#000';
+  dx.fillRect(0, 0, 320, 200);
+  // "YOU DIED" in big red pixel letters — reuse pixelText approach inline
+  const font = {
+    'Y':[[1,0,1],[1,0,1],[0,1,0],[0,1,0],[0,1,0]],
+    'O':[[0,1,0],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],
+    'U':[[1,0,1],[1,0,1],[1,0,1],[1,0,1],[0,1,0]],
+    ' ':[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]],
+    'D':[[1,1,0],[1,0,1],[1,0,1],[1,0,1],[1,1,0]],
+    'I':[[1,1,1],[0,1,0],[0,1,0],[0,1,0],[1,1,1]],
+    'E':[[1,1,1],[1,0,0],[1,1,0],[1,0,0],[1,1,1]],
+  };
+  const text = 'YOU DIED';
+  let cx = 40;
+  for (const ch of text) {
+    const map = font[ch] || font[' '];
+    for (let row = 0; row < 5; row++) {
+      for (let col = 0; col < 3; col++) {
+        if (map[row][col]) {
+          dx.fillStyle = '#cc0000';
+          dx.fillRect(cx + col * 7, 80 + row * 7, 6, 6);
+        }
+      }
+    }
+    cx += 3 * 7 + 4;
+  }
+  for (let y = 0; y < 200; y += 2) { dx.fillStyle = 'rgba(0,0,0,0.25)'; dx.fillRect(0, y, 320, 1); }
+}
+
+// Animate title screen
+let titleAnimFrame;
+function animateTitle() {
+  drawTitleScreen();
+  titleAnimFrame = requestAnimationFrame(animateTitle);
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 const overlayEl = document.getElementById('overlay');
+animateTitle();
 
 overlayEl.addEventListener('click', () => {
+  cancelAnimationFrame(titleAnimFrame);
   overlayEl.style.display = 'none';
   gameStarted = true;
   lastTime = performance.now();
