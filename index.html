@@ -159,8 +159,12 @@ let walkTimer = 0;
 let heartbeatRecovery = null;
 
 // ─── Stage / Progression ──────────────────────────────────────────────────────
-let gameStage = 1;        // 1=normal, 2=friend-hunt, 3=final-chaos
-let distortionLevel = 0;  // 0=none, 1=mild, 2=heavy
+// Stage 0: Start — kill the eye (normal game)
+// Stage 1: Wire round — cut 3 boxes in 90s (60s free + 30s music)
+// Stage 2: Friend hunt — find friend.png by sound (distorted world)
+// Stage 3: Final — 3 eyes, find exit (heavily distorted)
+let gameStage = 0;
+let distortionLevel = 0;  // 0=none, 1=mild (stage 2), 2=heavy (stage 3)
 let wireBoxes = [];
 let wireBoxesDestroyed = 0;
 let puzzleSolved = false;
@@ -410,8 +414,8 @@ function generateChunk(cx, cy) {
       const wy = originY + gy + 0.5;
       if (isSpawnChunk && Math.abs(wx - 1.5) < 4 && Math.abs(wy - 1.5) < 4) continue;
 
-      // Crates — stages 1 and 2 only
-      if (gameStage <= 2) {
+      // Crates — stages 0 and 1 only
+      if (gameStage <= 1) {
         const roll = hash(cx * 1000 + gx, cy * 1000 + gy);
         if (roll < 0.20) {
           const count = 1 + (hash(gx * 7 + cx, gy * 13 + cy) < 0.35 ? 1 : 0);
@@ -423,12 +427,19 @@ function generateChunk(cx, cy) {
         }
       }
 
-      // Wire boxes — stage 2 only (puzzle phase, before puzzle solved)
-      // NOTE: removed — wire boxes were stage 1 puzzle mechanic, not needed in stage 2
+      // Wire boxes — stage 1 only (wire puzzle round, 8% of open cells)
+      if (gameStage === 1) {
+        const wroll = hash(cx * 1337 + gx * 3, cy * 7919 + gy * 5);
+        if (wroll < 0.08) {
+          const wox = (hash(gx * 53 + cx, gy * 97 + cy) - 0.5) * 0.5;
+          const woy = (hash(gx * 61 + cx, gy * 83 + cy) - 0.5) * 0.5;
+          wireBoxes.push({ wx: wx + wox, wy: wy + woy, hp: 4, broken: false });
+        }
+      }
     }
   }
 
-  // ── Exit portals — stage 3 only, 10% chance per WALL cell (natural light on walls) ──
+  // ── Exit portals — stage 3 only, 10% chance per WALL cell ──
   if (gameStage === 3) {
     for (let gy = 0; gy < CHUNK_SIZE * 2 + 1; gy++) {
       for (let gx = 0; gx < CHUNK_SIZE * 2 + 1; gx++) {
@@ -780,7 +791,7 @@ function runCutscene(staticEl, textEl) {
           if (sounds.ambient)   sounds.ambient.volume   = 0.6;
           if (sounds.heartbeat) sounds.heartbeat.volume = 0.5;
           eyeKilled = true;
-          gameStage = 2;
+          gameStage = 1;  // wire round
           staticSequenceActive = false;
           playerFrozen = false;
           friendThemeTimer = 0;
@@ -838,12 +849,12 @@ function spawnFriendEntity() {
   }
 }
 
-// ─── Friend Sequence (Stage 1 only — 3min30s timer before friend scare) ──────
+// ─── Friend Sequence (Stage 1 — wire round, 90s total: 60s free + 30s music) ──
 function updateFriendSequence(dt) {
-  // Only runs in stage 1 after eye is killed
-  if (!eyeKilled || gameStage !== 1 || friendSequenceActive || friendScareActive) return;
+  if (gameStage !== 1 || friendSequenceActive || friendScareActive) return;
   gamePlayTime += dt;
-  if (!friendThemeStarted && gamePlayTime >= 180) {
+  // Music starts at 60s
+  if (!friendThemeStarted && gamePlayTime >= 60) {
     friendThemeStarted = true;
     sounds.friendTheme.loop = false;
     sounds.friendTheme.currentTime = 0;
@@ -851,6 +862,7 @@ function updateFriendSequence(dt) {
     heartbeatTargetVol = 1.0;
     heartbeatTargetRate = 2.0;
   }
+  // Scare fires 30s after music starts (90s total)
   if (friendThemeStarted && !friendScareActive) {
     friendThemeTimer += dt;
     const ramp = Math.min(1, friendThemeTimer / 30);
@@ -913,7 +925,9 @@ function triggerFriendScare() {
 // ─── Show Main Menu (with distortion) ────────────────────────────────────────
 function showMainMenu(level) {
   distortionLevel = level;
-  gameStage = level + 1; // level 1 distortion → stage 2 (friend hunt), level 2 → stage 3
+  // level 1 = after wire puzzle scare → stage 2 (friend hunt, mild distortion)
+  // level 2 = after friend flicker → stage 3 (final chaos, heavy distortion)
+  gameStage = level + 1;
   gameStarted = false;
   // Stop all game audio
   for (const key of Object.keys(sounds)) {
@@ -1131,14 +1145,14 @@ function renderScene() {
 
   bctx.putImageData(imgData, 0, 0);
 
-  // Stage 2: mild glitch pass
-  if (gameStage === 2) {
+  // Stage 2+: glitch pass (mild in stage 2, heavy in stage 3)
+  if (gameStage >= 2) {
     const g2 = bctx.getImageData(0, 0, RENDER_W, RENDER_H);
     const g2d = g2.data;
-    const lc2 = 2 + Math.floor(Math.random() * 3);
+    const lc2 = gameStage === 3 ? 8 + Math.floor(Math.random() * 6) : 2 + Math.floor(Math.random() * 3);
     for (let i = 0; i < lc2; i++) {
       const gy2 = Math.floor(Math.random() * RENDER_H);
-      const shift2 = Math.floor((Math.random() - 0.5) * 12);
+      const shift2 = Math.floor((Math.random() - 0.5) * (gameStage === 3 ? 40 : 12));
       if (shift2 === 0) continue;
       const rs = gy2 * RENDER_W * 4;
       const rowCopy2 = g2d.slice(rs, rs + RENDER_W * 4);
@@ -1150,10 +1164,19 @@ function renderScene() {
         g2d[rs + px*4+3] = rowCopy2[sp+3];
       }
     }
+    // Stage 4: also corrupt some pixel colors
+    if (gameStage === 3) {  // pixel corruption in final stage
+      for (let i = 0; i < 300; i++) {
+        const pi = (Math.floor(Math.random() * RENDER_H) * RENDER_W + Math.floor(Math.random() * RENDER_W)) * 4;
+        g2d[pi]   = Math.random() * 255 | 0;
+        g2d[pi+1] = Math.random() * 255 | 0;
+        g2d[pi+2] = Math.random() * 255 | 0;
+      }
+    }
     bctx.putImageData(g2, 0, 0);
   }
 
-  // Stage 3: heavy scanline glitch pass
+  // Stage 3: additional heavy scanline glitch pass
   if (gameStage === 3) {
     const glitchData = bctx.getImageData(0, 0, RENDER_W, RENDER_H);
     const gd = glitchData.data;
@@ -1216,21 +1239,19 @@ function renderSprites() {
     sprites.push({ x: box.wx, y: box.wy, dist, type: 'wireBox', data: box });
   }
 
-  if (gameStage >= 2 && friendEntity) {
+  if (gameStage === 3 && friendEntity) {
     const dx = friendEntity.x - player.x, dy = friendEntity.y - player.y;
     const dist = Math.sqrt(dx*dx+dy*dy);
     sprites.push({ x: friendEntity.x, y: friendEntity.y, dist, type: 'friend' });
   }
 
-  if (gameStage >= 3 && exitPortals.length > 0) {
+  if (gameStage === 3 && exitPortals.length > 0) {
     for (const ep of exitPortals) {
       const dx = ep.x - player.x, dy = ep.y - player.y;
       const dist = Math.sqrt(dx*dx+dy*dy);
       sprites.push({ x: ep.x, y: ep.y, dist, type: 'exit' });
     }
   }
-
-  // Stage 3 eye entities
   for (const e3 of entities3) {
     if (!e3.active) continue;
     const dx = e3.x - player.x, dy = e3.y - player.y;
@@ -1444,14 +1465,14 @@ function drawHUD() {
   bctx.lineWidth = 1;
   bctx.strokeRect(0, hudY, hudW, hudH);
 
-  // HP
-  bctx.fillStyle = '#8b0000';
+  // HP text — distorted in stages 3+
+  const hpDistort = gameStage >= 2;
+  bctx.fillStyle = hpDistort ? (gameStage === 3 ? '#8a2a8a' : '#2a8a2a') : '#8b0000';
   bctx.font = '8px monospace';
-  const garble = (s) => {
-    if (gameStage < 3) return s;
-    return s.split('').map(c => Math.random() < 0.3 ? String.fromCharCode(33 + Math.floor(Math.random()*90)) : c).join('');
-  };
-  bctx.fillText(garble(`HP: ${Math.ceil(player.hp)}/${player.maxHp}`), 4, hudY + 10);
+  const hpText = hpDistort && gameStage === 3
+    ? `${String.fromCharCode(33+Math.random()*30|0)}${Math.ceil(player.hp)}/${String.fromCharCode(33+Math.random()*30|0)}`
+    : `HP: ${Math.ceil(player.hp)}/${player.maxHp}`;
+  bctx.fillText(hpText, 4, hudY + 10);
 
   // HP bar
   const barW = 60, barH = 5;
@@ -1470,39 +1491,34 @@ function drawHUD() {
   const mainItem = getMainHand();
   const offItem  = getOffHand();
 
-  bctx.strokeStyle = '#555';
+  // Slot border colors — distorted in stages 3+
+  const slotBorder1 = gameStage >= 2 ? (gameStage === 3 ? '#8a2a8a' : '#2a6a2a') : '#555';
+  const slotBorder2 = gameStage >= 2 ? (gameStage === 3 ? '#6a1a6a' : '#1a4a1a') : '#444';
+  bctx.strokeStyle = slotBorder1;
   bctx.lineWidth = 1;
   bctx.strokeRect(slotX1, slotY, slotSize, slotSize);
   bctx.fillStyle = 'rgba(20,20,20,0.8)';
   bctx.fillRect(slotX1+1, slotY+1, slotSize-2, slotSize-2);
   if (mainItem) drawItemIcon(bctx, mainItem, slotX1+2, slotY+2, slotSize-4);
 
-  // Off hand
-  bctx.strokeStyle = '#444';
+  bctx.strokeStyle = slotBorder2;
   bctx.strokeRect(slotX2, slotY, slotSize, slotSize);
   bctx.fillStyle = 'rgba(20,20,20,0.8)';
   bctx.fillRect(slotX2+1, slotY+1, slotSize-2, slotSize-2);
   if (offItem) drawItemIcon(bctx, offItem, slotX2+2, slotY+2, slotSize-4);
 
-  // Labels
-  bctx.fillStyle = '#555';
+  bctx.fillStyle = gameStage >= 2 ? slotBorder2 : '#555';
   bctx.font = '5px monospace';
   bctx.fillText('MAIN', slotX1+2, slotY + slotSize + 6);
   bctx.fillText('OFF', slotX2+3, slotY + slotSize + 6);
 
-  // Wire box counter (stage 1 post-eye only, while puzzle not yet solved)
-  if (gameStage === 1 && eyeKilled && !puzzleSolved) {
+  // Wire box counter — stage 1 only, while puzzle not solved
+  if (gameStage === 1 && !puzzleSolved) {
     bctx.fillStyle = '#ff0';
     bctx.font = '7px monospace';
     bctx.fillText(`BOXES: ${wireBoxesDestroyed}/3`, 4, hudY - 4);
   }
-  // Stage 2 hint
-  if (gameStage === 2) {
-    bctx.fillStyle = `hsl(${(Date.now()*0.2)%360|0},80%,60%)`;
-    bctx.font = '6px monospace';
-    const hint = Math.floor(Date.now()/800)%2===0 ? 'FOLLOW THE SOUND' : '????????????';
-    bctx.fillText(hint, 4, hudY - 4);
-  }
+  // No hint text in stage 2 — player finds friend by sound alone
 }
 
 function drawItemIcon(ctx2, item, x, y, size) {
@@ -1546,26 +1562,25 @@ function drawHand() {
   const punchOffset = punchAnim > 0.5 ? (1 - punchAnim) * 20 : punchAnim * 20;
   const hxP = hx - punchOffset;
 
-  // Arm/wrist — glitchy colors in stages 2+
-  const skinColor = gameStage >= 2 ? `hsl(${(Date.now()*0.1)%360|0},60%,50%)` : '#c68642';
-  const knuckleColor = gameStage >= 2 ? `hsl(${((Date.now()*0.1)+40)%360|0},60%,40%)` : '#b5763a';
-  bctx.fillStyle = skinColor;
+  // Arm/wrist — distorted colors in stages 3+ (wrong tones, not rainbow)
+  const glitchSkin = gameStage >= 2;
+  const skinColor   = glitchSkin ? (gameStage === 3 ? '#7a5a8a' : '#6a8a42') : '#c68642';
+  const knuckleColor = glitchSkin ? (gameStage === 3 ? '#5a3a6a' : '#4a6a22') : '#b5763a';
+  const flicker = glitchSkin && Math.random() < 0.15;
+  bctx.fillStyle = flicker ? '#2a2a2a' : skinColor;
   bctx.fillRect(hxP + 15, hy + 20, 20, 20);
 
-  // Knuckles
-  bctx.fillStyle = knuckleColor;
+  bctx.fillStyle = flicker ? '#1a1a1a' : knuckleColor;
   bctx.fillRect(hxP + 12, hy + 10, 26, 14);
 
-  // Fingers (4 blocks)
   for (let i = 0; i < 4; i++) {
-    bctx.fillStyle = skinColor;
+    bctx.fillStyle = flicker ? '#333' : skinColor;
     bctx.fillRect(hxP + 12 + i*7, hy, 6, 12);
-    bctx.fillStyle = knuckleColor;
+    bctx.fillStyle = flicker ? '#222' : knuckleColor;
     bctx.fillRect(hxP + 12 + i*7, hy + 8, 6, 4);
   }
 
-  // Thumb
-  bctx.fillStyle = skinColor;
+  bctx.fillStyle = flicker ? '#2a2a2a' : skinColor;
   bctx.fillRect(hxP + 8, hy + 14, 6, 10);
 
   // Draw held item based on active hand
@@ -1840,15 +1855,15 @@ function gameLoop(ts) {
   if (moved) handSway += 0.15;
   if (punchAnim > 0) { punchAnim -= dt * 4; if (punchAnim < 0) punchAnim = 0; }
 
-  // ── Entity (stage 1 only — no eye in stages 2/3) ──
-  if (gameStage === 1) {
+  // ── Entity (stage 0 only — eye chases in normal game) ──
+  if (gameStage === 0) {
     updateEntity(dt);
   }
   applyHeartbeat(dt);
   updateLighting(dt, ts);
-  updateFriendSequence(dt); // only fires in stage 1
+  updateFriendSequence(dt); // fires in stage 1 only
 
-  // ── Stage 2: friend entity proximity (stationary, emits friend-theme as proximity audio) ──
+  // ── Stage 2: friend entity proximity (find friend.png by sound) ──
   if (gameStage === 2 && friendEntity && !friendFlickerActive) {
     const fdx = friendEntity.x - player.x, fdy = friendEntity.y - player.y;
     const fdist = Math.sqrt(fdx*fdx+fdy*fdy);
@@ -1858,13 +1873,12 @@ function gameLoop(ts) {
     if (fdist < 0.8) triggerFriendFlicker();
   }
 
-  // ── Stage 3: exit portal check (any portal) ──
+  // ── Stage 3: exit portal check + 3 eye entities ──
   if (gameStage === 3) {
     for (const ep of exitPortals) {
       const edx = ep.x - player.x, edy = ep.y - player.y;
       if (Math.sqrt(edx*edx+edy*edy) < 1.0) { triggerEnding(); break; }
     }
-    // Update 3 eye entities — they chase but cannot kill (no HP drain in stage 3)
     for (const e3 of entities3) {
       if (!e3.active) continue;
       const d3x = player.x - e3.x, d3y = player.y - e3.y;
@@ -1886,14 +1900,14 @@ function gameLoop(ts) {
     }
   }
 
-  // ── Friend scare: drain HP (only in stage 1/2, not stage 3) ──
-  if (friendScareActive && !dead && gameStage < 3) {
+  // ── Friend scare HP drain (stage 1, puzzle failed) ──
+  if (friendScareActive && !dead && gameStage === 1) {
     player.hp = Math.max(0, player.hp - 10 * dt);
     shakeIntensity = Math.max(0, shakeIntensity - dt * 0.5);
   }
 
-  // ── Death check (disabled in stage 3) ──
-  if (player.hp <= 0 && !dead && gameStage < 3) { triggerDeath(); return; }
+  // ── Death check (stages 0 and 1 only — stages 2/3 are immortal) ──
+  if (player.hp <= 0 && !dead && gameStage <= 1) { triggerDeath(); return; }
 
   // ── Ensure nearby chunks are generated ──
   const [ccx, ccy] = getChunkCoords(player.x, player.y);
@@ -2122,7 +2136,7 @@ overlayEl.addEventListener('click', () => {
   friendThemeStarted = false;
   friendThemeTimer = 0;
   shakeIntensity = 0;
-  eyeKilled = savedStage >= 2;
+  eyeKilled = savedStage >= 1;
   gamePlayTime = 0;
   staticSequenceActive = false;
   staticAlpha = 0;
@@ -2138,14 +2152,18 @@ overlayEl.addEventListener('click', () => {
   if (!sounds.ambient) initAudio();
   if (!eyeImg) loadEyeImg();
 
-  if (savedStage === 1) {
+  if (savedStage === 0) {
+    // Normal start — eye spawns after 30s
     entityStartTimer = setTimeout(() => { entity.active = true; }, ENTITY_START_DELAY);
+  } else if (savedStage === 1) {
+    // Wire round — no eye, cut 3 boxes in 90s
+    entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
+    eyeKilled = true;
   } else if (savedStage === 2) {
-    // Stage 2: no eye entity at all, friend.png waits stationary
+    // Friend hunt — no eye, friend.png stationary, follow sound
     entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
     eyeKilled = true;
     spawnFriendEntity();
-    // friend-theme starts silent, gets louder as player approaches
     if (sounds.friendTheme) {
       sounds.friendTheme.loop = true;
       sounds.friendTheme.volume = 0;
@@ -2153,7 +2171,7 @@ overlayEl.addEventListener('click', () => {
       sounds.friendTheme.play().catch(()=>{});
     }
   } else if (savedStage === 3) {
-    // Stage 3: heavy glitch, 3 eyes chasing, exits on walls, no crates, no death
+    // Final round — 3 eyes, exits on walls, no death
     entity = { x: 999, y: 999, active: false, dist: 999, hp: 3, dead: true };
     gameStartTime = performance.now();
     entities3 = [];
